@@ -65,7 +65,7 @@ from typing import Any, Iterable
 import numpy as np
 
 
-ENGINE_VERSION = "11.9.0"
+ENGINE_VERSION = "11.10.0"
 # Le coeur numerique est identique a celui de la v11.4. Garder cette valeur
 # preserve exactement ses tirages; ne la changer que pour une modification du
 # modele ou de la loi de simulation, jamais pour du reporting ou de la CLI.
@@ -77,8 +77,13 @@ ENGINE_VERSION = "11.9.0"
 # dossier qui gagne un bloc collection. La LOI est identique; l'ENTREE ne
 # l'est pas. C'est exactement la distinction que le couple de versions sert.
 MODEL_VERSION = "11.4.0"
-INPUT_SCHEMA = "titan-plat-input-11.6"
-LEGACY_INPUT_SCHEMAS = {"titan-plat-input-11.1"}
+INPUT_SCHEMA = "titan-plat-input-11.10"
+# 11.6 reste accepte: les champs v11.10 sont tous OPTIONNELS et un dossier
+# 11.6 produit exactement les memes nombres qu'avant. Le numero change parce
+# que le SENS d'ability_class change des qu'une marge est declaree, et qu'un
+# dossier v11.10 doit etre refuse par un moteur v11.9 sur le schema plutot que
+# de facon detournee par la clause anti-ecrasement.
+LEGACY_INPUT_SCHEMAS = {"titan-plat-input-11.1", "titan-plat-input-11.6"}
 REPORT_SCHEMA = "titan-plat-report-11.6"
 SAMPLES_SCHEMA = "titan-plat-rank-samples-11.1"
 RESULT_SCHEMA = "titan-plat-result-11.5"
@@ -227,6 +232,83 @@ WEIGHT_MIN_KG = 40.0
 WEIGHT_MAX_KG = 75.0
 RACE_TYPES = {
     "HANDICAP", "CONDITIONS", "GROUPE", "LISTED", "RECLAMER", "MAIDEN", "AUTRE",
+}
+
+# ---------------------------------------------------------------------------
+# LONGUEUR DE BATTUE (v11.10)
+#
+# Defaut le plus grossier de la v11.9: within_race_performance() ne lisait que
+# la PLACE et la taille du peloton. Un 4e battu d'une encolure et un 4e battu de
+# quinze longueurs recevaient donc exactement la meme note de sortie. C'est faux
+# dans les deux sens: le premier a couru le niveau de la course, le second n'y
+# avait pas sa place. La place est un rang; la marge est une mesure.
+#
+# Conversion. Une longueur vaut environ 2,4 m. Rapportee a la distance de la
+# course, elle donne une PERTE RELATIVE de temps, donc une grandeur comparable
+# entre un 1200 m et un 2400 m: cinq longueurs sur 1200 m sont un gouffre, sur
+# 2800 m une nuance. C'est la raison pour laquelle le handicapping anglo-saxon
+# fait varier son bareme longueurs-livres avec la distance, et c'est ce que
+# cette normalisation reproduit sans avoir a tabuler quoi que ce soit.
+#
+# CADRANS DECLARES, NON CALIBRES - au sens du principe 2.6, exactement comme
+# CLASS_PERFORMANCE_BETA. Aucun n'a ete ajuste sur donnees.
+#
+#   MARGIN_LENGTH_METRES     geometrie, la seule valeur non arbitraire du bloc
+#   MARGIN_REFERENCE_SPREAD  perte relative correspondant a un cheval
+#                            "franchement battu" (~15 L sur 1600 m = 2,25 %).
+#                            Fixe a 2,5 %; c'est le zero de l'echelle basse.
+#   MARGIN_WEIGHT            confiance accordee a la marge CONTRE le rang.
+#                            Volontairement a 0,5 et pas davantage: un cheval
+#                            qu'on laisse finir sans insister affiche une marge
+#                            qui surestime sa defaite. C'est le biais connu des
+#                            figures a la marge, et le rang y est immunise.
+#   MARGIN_DEFAULT_DISTANCE  distance de repli quand distance_m est absente.
+#   MARGIN_EPISTEMIC_K       elargissement d'incertitude quand la marge manque
+#                            alors que le peloton la documente ailleurs.
+MARGIN_LENGTH_METRES = 2.4
+MARGIN_REFERENCE_SPREAD = 0.025
+MARGIN_WEIGHT = 0.50
+MARGIN_DEFAULT_DISTANCE_M = 1600.0
+MARGIN_EPISTEMIC_K = 0.10
+MARGIN_EPISTEMIC_MAX = 0.25
+MARGIN_MAX_LENGTHS = 99.0
+DISTANCE_MIN_M = 800.0
+DISTANCE_MAX_M = 6000.0
+
+# ---------------------------------------------------------------------------
+# EFFETS HUMAINS EN A/E (v11.10)
+#
+# En v11.9, human_equipment etait un score libre plafonne a +/-0,35: le seul
+# axe ou le modele pouvait encore ecrire un chiffre sans qu'aucun fait ne
+# l'adosse. L'annexe ecosysteme est pourtant explicite (§3 et §7): un effet
+# humain sans periode, denominateur et contexte vaut zero, et il se mesure en
+# A/E, jamais en taux de reussite brut.
+#
+# La difference n'est pas cosmetique. Un taux de reussite mesure la QUALITE DES
+# CHEVAUX CONFIES a une ecurie; l'A/E mesure ce qu'elle ajoute par rapport a ce
+# que le marche attendait deja. Un entraineur a 25 % de reussite dont tous les
+# partants etaient favoris a un A/E de 1,0: il n'apporte rien qui ne soit deja
+# dans le prix. C'est l'erreur la plus repandue du domaine, et la v11.9 la
+# laissait entrer par la porte d'un champ libre.
+#
+# Desormais: valeur non nulle => enregistrement A/E declare et denominateur
+# obligatoires, et c'est le MOTEUR qui calcule le score. Meme chemin que
+# ability_class depuis la v11.8.
+#
+# CADRANS DECLARES, NON CALIBRES.
+#   HUMAN_AE_SHRINK_PRIOR  nb de partants pour crediter la moitie de l'ecart.
+#                          200 parce qu'un A/E de 1,60 sur 25 partants est moins
+#                          fiable qu'un A/E de 1,08 sur 1500 (annexe §3).
+#   HUMAN_AE_BETA          conversion d'un log-A/E en points d'axe.
+#   HUMAN_AE_MIN_RUNNERS   sous ce denominateur, l'enregistrement est refuse.
+HUMAN_AE_SHRINK_PRIOR = 200.0
+HUMAN_AE_BETA = 0.55
+HUMAN_AE_MIN_RUNNERS = 30
+HUMAN_AE_MAX = 4.0
+HUMAN_AE_WINDOWS = {14, 30, 90, 180, 365}
+HUMAN_AE_SCOPES = {
+    "TRAINER", "JOCKEY", "TRAINER_COURSE", "TRAINER_CATEGORY",
+    "JOCKEY_COURSE", "TRAINER_JOCKEY", "EQUIPMENT_CHANGE", "STABLE",
 }
 
 SCENARIO_STRENGTH = {"LOW": 8.0, "MEDIUM": 25.0, "HIGH": 80.0, "VERY_HIGH": 200.0}
@@ -587,9 +669,85 @@ def families_of(registry: dict[str, Any], ids: Iterable[str]) -> set[str]:
 # 3. PARTANTS ET SCENARIOS
 # ---------------------------------------------------------------------------
 
+def epistemic_floors(
+    epistemic_by_number: dict[int, float],
+    readings: dict[int, dict[str, Any]],
+    form_lines: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """Plancher d'incertitude RELATIF au peloton, pour chaque partant concerne.
+
+    Trois motifs elargissent l'incertitude, et aucun ne touche au niveau:
+      - un incident de parcours declare (v11.7);
+      - des sorties heterogenes (v11.9);
+      - des longueurs de battue moins documentees que celles du peloton (v11.10).
+
+    Ils se combinent par le MAXIMUM et non par la somme: un cheval gene,
+    irregulier ET sans marge n'est pas trois fois plus opaque, il l'est au moins
+    autant que par le pire de ses motifs.
+
+    Pourquoi RELATIF au peloton. Un plancher absolu se laisserait satisfaire par
+    n'importe quel remplissage uniformement large. La revendication reelle est
+    ordinale: ce cheval est MOINS lisible que ses rivaux. Elle n'a donc de sens
+    que par rapport a eux.
+
+    Fonction extraite en v11.10 pour etre partagee entre la validation et la
+    reconstruction apres non-partant. Les deux DOIVENT lire le meme plancher:
+    une copie du calcul finirait par diverger, et c'est precisement une
+    divergence de ce genre qui a produit le pire bug de la serie.
+    """
+    values = list(epistemic_by_number.values())
+    median = float(np.median(values)) if values else 0.0
+    documented = [
+        float(item.get("margin_coverage", 0.0))
+        for item in form_lines.values() if item.get("declared")
+    ]
+    field_margin_coverage = float(np.mean(documented)) if documented else 0.0
+    by_number: dict[int, dict[str, Any]] = {}
+    for number in epistemic_by_number:
+        reading = readings.get(number, {})
+        form = form_lines.get(number, {})
+        trouble_increment = float(reading.get("epistemic_floor_increment", 0.0))
+        dispersion_increment = float(form.get("dispersion_increment", 0.0))
+        margin_increment = 0.0
+        if field_margin_coverage > 0.0 and form.get("declared"):
+            shortfall = max(
+                0.0, field_margin_coverage - float(form.get("margin_coverage", 0.0))
+            )
+            margin_increment = min(
+                MARGIN_EPISTEMIC_MAX, MARGIN_EPISTEMIC_K * shortfall
+            )
+        causes: list[str] = []
+        if reading.get("trouble_flags"):
+            causes.append(
+                f"{len(reading['trouble_flags'])} incident(s) de parcours "
+                f"(+{trouble_increment:.3f})"
+            )
+        if dispersion_increment > 0.05:
+            causes.append(f"sorties heterogenes (+{dispersion_increment:.3f})")
+        if margin_increment > 0.05:
+            causes.append(
+                f"longueurs de battue moins documentees que le peloton "
+                f"(+{margin_increment:.3f})"
+            )
+        if not causes:
+            continue
+        increment = max(trouble_increment, dispersion_increment, margin_increment)
+        by_number[number] = {
+            "floor": median + increment,
+            "increment": increment,
+            "causes": causes,
+        }
+    return {"median": median, "field_margin_coverage": field_margin_coverage,
+            "by_number": by_number}
+
+
 def validate_runners(
     raw: dict[str, Any], registry: dict[str, Any], as_of: datetime
-) -> tuple[list[dict[str, Any]], list[int], dict[int, set[str]], dict[int, set[str]], set[str]]:
+) -> tuple[
+    list[dict[str, Any]], list[int], dict[int, set[str]], dict[int, set[str]],
+    set[str], dict[int, dict[str, Any]], dict[int, dict[str, Any]],
+    dict[str, Any], dict[str, Any], dict[int, dict[str, Any]],
+]:
     runners = require(raw, "runners", "root")
     if not isinstance(runners, list):
         raise InputError("runners doit etre une liste")
@@ -605,6 +763,8 @@ def validate_runners(
     trouble_context: dict[int, tuple[str, dict[str, Any], float]] = {}
     form_lines: dict[int, dict[str, Any]] = {}
     declared_ability: dict[int, tuple[str, float]] = {}
+    human_records: dict[int, dict[str, Any]] = {}
+    declared_human: dict[int, tuple[str, float]] = {}
     for idx, runner in enumerate(active):
         where = f"runners.active[{idx}]"
         number = require(runner, "no", where)
@@ -660,6 +820,8 @@ def validate_runners(
         reading = validate_race_reading(runner, registry, as_of, where)
         readings[number] = reading
         form_lines[number] = validate_form_lines(runner, registry, as_of, where)
+        human_records[number] = validate_human_records(runner, registry, as_of, where)
+        declared_human[number] = (where, float(components["human_equipment"]["value"]))
         declared_ability[number] = (where, float(components["ability_class"]["value"]))
         epistemic_by_number[number] = epistemic
         trouble_context[number] = (where, reading, float(components["recent_form"]["value"]))
@@ -692,30 +854,17 @@ def validate_runners(
     # incertain que le partant median, sans quoi l'incident n'a rien change et sa
     # declaration n'etait qu'un ornement. Un plancher absolu se laisserait
     # satisfaire par n'importe quel remplissage un peu large.
-    median_epistemic = float(np.median(list(epistemic_by_number.values())))
+    floors = epistemic_floors(epistemic_by_number, readings, form_lines)
+    median_epistemic = floors["median"]
     for number, (where, reading, form_value) in trouble_context.items():
-        has_dispersion = float(
-            form_lines.get(number, {}).get("dispersion_increment", 0.0)
-        ) > 0.05
-        if not reading["trouble_flags"] and not has_dispersion:
-            continue
-        # Les deux sources d'elargissement se combinent par le maximum, pas par
-        # la somme: un cheval gene ET irregulier n'est pas deux fois plus opaque,
-        # il l'est au moins autant que par le pire des deux motifs.
-        dispersion_increment = float(
-            form_lines.get(number, {}).get("dispersion_increment", 0.0)
-        )
-        floor = median_epistemic + max(
-            reading["epistemic_floor_increment"], dispersion_increment
-        )
-        if epistemic_by_number[number] + 1e-12 < floor:
+        detail = floors["by_number"].get(number)
+        if detail is not None and epistemic_by_number[number] + 1e-12 < detail["floor"]:
             raise InputError(
-                f"{where}: {len(reading['trouble_flags'])} incident(s) de parcours "
-                f"declare(s) exigent epistemic_sd >= {floor:.3f} (mediane du peloton "
-                f"{median_epistemic:.3f} + {reading['epistemic_floor_increment']:.3f}), "
-                f"valeur fournie {epistemic_by_number[number]:.3f}. Un cheval gene est "
-                "un cheval dont la performance est MOINS informative que celle de ses "
-                "rivaux, ce qui elargit son incertitude."
+                f"{where}: {' et '.join(detail['causes'])} exigent epistemic_sd >= "
+                f"{detail['floor']:.3f} (mediane du peloton {median_epistemic:.3f}), "
+                f"valeur fournie {epistemic_by_number[number]:.3f}. Une performance "
+                "moins informative que celle des rivaux elargit l'incertitude; elle "
+                "ne baisse jamais le niveau."
             )
         if reading["trouble_flags"] and form_value > READING_FORM_CAP_WITH_TROUBLE:
             raise InputError(
@@ -767,9 +916,35 @@ def validate_runners(
                 "form_lines est fourni, ability_class n'est plus un jugement: c'est une "
                 "fonction des faits. Recopier la valeur calculee, ou corriger les faits."
             )
+    # EFFETS HUMAINS v11.10. Meme chemin que l'echelle de classe: le collecteur
+    # declare des faits - fenetre, denominateur, victoires, attendu - et le
+    # moteur calcule. Un human_equipment non nul sans enregistrement A/E est
+    # refuse, parce que c'etait le dernier axe ou un chiffre pouvait entrer dans
+    # le hash sans qu'aucun fait ne l'adosse.
+    for number, (where, declared_value) in declared_human.items():
+        record = human_records.get(number, {"declared": False, "value": 0.0})
+        if not record.get("declared"):
+            if abs(declared_value) > 1e-9:
+                raise InputError(
+                    f"{where}.score_components.human_equipment = {declared_value:.4f} "
+                    "sans human_records. Un effet humain sans fenetre, denominateur et "
+                    "A/E vaut ZERO: un taux de reussite mesure la qualite des chevaux "
+                    "confies, pas la valeur ajoutee de l'entourage. Declarer un "
+                    "enregistrement A/E, ou remettre l'axe a zero."
+                )
+            continue
+        expected_value = float(record["value"])
+        if abs(declared_value - expected_value) > 1e-3:
+            raise InputError(
+                f"{where}.score_components.human_equipment = {declared_value:.4f} alors "
+                f"que les {record['n_records']} enregistrement(s) A/E declares donnent "
+                f"{expected_value:.4f}. Quand human_records est fourni, l'axe n'est plus "
+                "un jugement: c'est une fonction des faits. Recopier la valeur calculee, "
+                "ou corriger les faits."
+            )
     compression = handicap_compression(active, race_type)
     return (active, numbers, baseline_families, factor_families, sport_ids,
-            readings, form_lines, ladder, compression)
+            readings, form_lines, ladder, compression, human_records)
 
 
 def validate_scenarios(
@@ -1272,6 +1447,57 @@ def within_race_performance(finish_position: int, field_size: int) -> float:
     return 1.0 - 2.0 * (finish_position - 1) / (field_size - 1)
 
 
+def margin_performance(
+    beaten_lengths: float, distance_m: float, finish_position: int
+) -> float:
+    """Performance mesuree a la MARGE, dans [-1, +1] comme la version au rang.
+
+    La marge est convertie en perte RELATIVE de temps - longueurs x 2,4 m sur la
+    distance - puis rapportee a MARGIN_REFERENCE_SPREAD. Un cheval battu de la
+    reference complete tombe a -1 et n'y descend pas plus bas: au-dela, la
+    distinction entre "battu de vingt longueurs" et "battu de quarante" n'est
+    plus une information sur l'aptitude, c'est du bruit de fin de course.
+
+    Le vainqueur vaut +1, comme au rang. Un dead-heat pour la victoire (place 1,
+    marge 0) vaut donc +1 pour les deux, ce qui est correct.
+    """
+    if distance_m <= 0.0:
+        distance_m = MARGIN_DEFAULT_DISTANCE_M
+    relative_loss = (beaten_lengths * MARGIN_LENGTH_METRES) / distance_m
+    slack = min(1.0, relative_loss / MARGIN_REFERENCE_SPREAD)
+    if finish_position == 1:
+        return 1.0
+    return 1.0 - 2.0 * slack
+
+
+def blended_performance(
+    finish_position: int, field_size: int,
+    beaten_lengths: float | None, distance_m: float | None,
+) -> tuple[float, bool]:
+    """Note de performance d'une sortie, marge comprise quand elle est declaree.
+
+    Retourne (performance, marge_utilisee). Sans marge declaree on retombe
+    exactement sur la v11.9 - propriete verrouillee par self-test, parce qu'un
+    dossier sans longueurs doit continuer a produire la meme note qu'avant.
+
+    Le melange est volontairement partiel (MARGIN_WEIGHT = 0,5). La marge est
+    une mesure plus fine que le rang, mais elle est aussi plus fragile: un
+    cheval que son jockey laisse finir sans insister - parce que la course est
+    jouee, ou pour le menager - affiche une marge qui exagere sa defaite. Le
+    rang, lui, y est insensible. On garde donc les deux lectures.
+    """
+    rank_based = within_race_performance(finish_position, field_size)
+    if beaten_lengths is None:
+        return rank_based, False
+    margin_based = margin_performance(
+        beaten_lengths,
+        MARGIN_DEFAULT_DISTANCE_M if distance_m is None else distance_m,
+        finish_position,
+    )
+    blended = (1.0 - MARGIN_WEIGHT) * rank_based + MARGIN_WEIGHT * margin_based
+    return blended, True
+
+
 def competitiveness(performance: float) -> float:
     """Part de la classe d'une course qu'un cheval a REELLEMENT justifiee.
 
@@ -1288,9 +1514,18 @@ def competitiveness(performance: float) -> float:
     return 0.25 + 0.75 * (1.0 + performance) / 2.0
 
 
-def outing_rating(allocation_eur: float, finish_position: int, field_size: int) -> float:
-    """Note d'une sortie: classe REELLEMENT justifiee, plus la performance."""
-    performance = within_race_performance(finish_position, field_size)
+def outing_rating(
+    allocation_eur: float, finish_position: int, field_size: int,
+    beaten_lengths: float | None = None, distance_m: float | None = None,
+) -> float:
+    """Note d'une sortie: classe REELLEMENT justifiee, plus la performance.
+
+    beaten_lengths et distance_m sont optionnels: absents, la note est celle de
+    la v11.9 au chiffre pres.
+    """
+    performance, _ = blended_performance(
+        finish_position, field_size, beaten_lengths, distance_m
+    )
     return (
         class_index(allocation_eur) * competitiveness(performance)
         + CLASS_PERFORMANCE_BETA * performance
@@ -1337,10 +1572,53 @@ def validate_form_lines(
         if run_date > as_of:
             raise InputError(f"Fuite temporelle: {lw} posterieur a as_of")
         age_days = max(0.0, (as_of - run_date).total_seconds() / 86400.0)
+        # LONGUEUR DE BATTUE (v11.10). Deux faits declares, lus sur la meme
+        # ligne de resultat que la place: aucune recherche supplementaire, et
+        # aucun jugement. Absents, on retombe exactement sur la v11.9.
+        beaten = line.get("beaten_lengths")
+        if beaten is not None:
+            beaten = as_float(beaten, f"{lw}.beaten_lengths")
+            if beaten < 0.0:
+                raise InputError(
+                    f"{lw}.beaten_lengths negatif: une marge se compte depuis le "
+                    f"vainqueur, elle ne peut pas etre inferieure a zero"
+                )
+            if beaten > MARGIN_MAX_LENGTHS:
+                raise InputError(
+                    f"{lw}.beaten_lengths hors [0,{MARGIN_MAX_LENGTHS:.0f}]: {beaten}"
+                )
+            if finish == 1 and beaten > 1e-9:
+                raise InputError(
+                    f"{lw}: un vainqueur ne peut pas etre battu de {beaten} longueurs"
+                )
+            if finish > 1 and beaten <= 0.0:
+                # Tolere: certaines sources arrondissent une courte tete a 0.
+                # On la traite comme une marge nulle, jamais comme une victoire.
+                beaten = 0.0
+        distance = line.get("distance_m")
+        if distance is not None:
+            distance = as_float(distance, f"{lw}.distance_m")
+            if not DISTANCE_MIN_M <= distance <= DISTANCE_MAX_M:
+                raise InputError(
+                    f"{lw}.distance_m hors [{DISTANCE_MIN_M:.0f},{DISTANCE_MAX_M:.0f}]:"
+                    f" {distance}"
+                )
+        if distance is not None and beaten is None:
+            raise InputError(
+                f"{lw}.distance_m declaree sans beaten_lengths: la distance ne sert "
+                f"qu'a normaliser une marge, seule elle n'informe rien"
+            )
+        performance, margin_used = blended_performance(
+            finish, field_size, beaten, distance
+        )
         parsed.append({
             "class_index": class_index(allocation),
-            "outing_rating": outing_rating(allocation, finish, field_size),
-            "performance": within_race_performance(finish, field_size),
+            "outing_rating": outing_rating(
+                allocation, finish, field_size, beaten, distance
+            ),
+            "performance": performance,
+            "margin_used": margin_used,
+            "margin_distance_declared": distance is not None,
             "age_days": age_days,
             "weight": 0.5 ** (age_days / CLASS_HALFLIFE_DAYS),
             "allocation_eur": allocation,
@@ -1366,9 +1644,20 @@ def validate_form_lines(
         min(DISPERSION_EPISTEMIC_MAX, DISPERSION_EPISTEMIC_K * dispersion)
         if len(parsed) >= DISPERSION_MIN_LINES else 0.0
     )
+    # Couverture de marge: part du POIDS de recence porte par des lignes dont la
+    # longueur de battue est declaree. On pondere par le poids et non par le
+    # nombre, parce qu'une marge sur une sortie d'il y a deux ans n'informe pas
+    # autant qu'une marge sur la derniere.
+    margin_weight = sum(item["weight"] for item in parsed if item["margin_used"])
+    margin_coverage = margin_weight / total_weight
     return {
         "declared": True,
         "n_lines": len(parsed),
+        "n_lines_with_margin": sum(1 for item in parsed if item["margin_used"]),
+        "margin_coverage": round(margin_coverage, 4),
+        "margin_distance_declared": all(
+            item["margin_distance_declared"] for item in parsed if item["margin_used"]
+        ) if any(item["margin_used"] for item in parsed) else False,
         "rating": round(rating, 4),
         "rating_dispersion": round(dispersion, 4),
         "dispersion_increment": round(dispersion_increment, 4),
@@ -1382,6 +1671,123 @@ def validate_form_lines(
         "effective_sample": round(total_weight, 3),
         "shrink": round(len(parsed) / (len(parsed) + CLASS_SHRINK_PRIOR), 4),
         "categories": sorted({item["category"] for item in parsed}),
+    }
+
+
+def validate_human_records(
+    runner: dict[str, Any], registry: dict[str, Any], as_of: datetime, where: str
+) -> dict[str, Any]:
+    """Effets humains: A/E declare et denominateur, ou zero. Aucun jugement.
+
+    Pourquoi l'A/E et pas le taux de reussite. Un taux de reussite de 25 %
+    mesure d'abord la QUALITE DES CHEVAUX CONFIES a une ecurie. Si ses partants
+    etaient tous favoris, elle n'a rien ajoute a ce que le marche savait deja:
+    son A/E vaut 1 et sa contribution honnete est nulle. L'A/E - victoires
+    reelles sur victoires attendues d'apres les cotes - est la seule des deux
+    mesures qui reponde a la question "cet entourage bat-il le prix ?".
+
+    Le retrecissement par denominateur fait le reste du travail: un A/E de 1,60
+    sur 25 partants pese moins qu'un A/E de 1,08 sur 1500 (annexe ecosysteme
+    §3, "failure mode dominant: les petits echantillons").
+    """
+    records = runner.get("human_records")
+    if records is None:
+        return {"declared": False, "n_records": 0, "value": 0.0,
+                "note": "aucun effet humain documente; human_equipment doit valoir zero"}
+    if not isinstance(records, list) or not records:
+        raise InputError(f"{where}.human_records doit etre null ou une liste non vide")
+    cap = LEVEL_CAPS["human_equipment"]
+    parsed: list[dict[str, Any]] = []
+    seen_scopes: set[str] = set()
+    total = 0.0
+    for idx, record in enumerate(records):
+        rw = f"{where}.human_records[{idx}]"
+        if not isinstance(record, dict):
+            raise InputError(f"Enregistrement humain invalide: {rw}")
+        eid = require_text(require(record, "evidence_id", rw), f"{rw}.evidence_id")
+        if eid not in registry:
+            raise InputError(f"{rw}.evidence_id inconnu du registre: {eid}")
+        if registry[eid]["tier"] not in {"F-S1", "D"}:
+            raise InputError(
+                f"{rw}: statistique humaine adossee a une preuve non documentaire. "
+                "Une declaration d'entraineur ou un bruit de piste est un tier H: "
+                "il peut ouvrir un scenario, jamais deplacer un niveau."
+            )
+        scope = require_text(require(record, "scope", rw), f"{rw}.scope")
+        if scope not in HUMAN_AE_SCOPES:
+            raise InputError(f"{rw}.scope doit etre parmi {sorted(HUMAN_AE_SCOPES)}")
+        if scope in seen_scopes:
+            raise InputError(
+                f"{rw}.scope duplique pour ce cheval: {scope}. Deux fenetres du meme "
+                "perimetre compteraient deux fois la meme information."
+            )
+        seen_scopes.add(scope)
+        window = require(record, "window_days", rw)
+        if isinstance(window, bool) or not isinstance(window, int):
+            raise InputError(f"{rw}.window_days doit etre un entier")
+        if window not in HUMAN_AE_WINDOWS:
+            raise InputError(
+                f"{rw}.window_days doit etre parmi {sorted(HUMAN_AE_WINDOWS)}: {window}"
+            )
+        runners_n = require(record, "runners", rw)
+        if isinstance(runners_n, bool) or not isinstance(runners_n, int) or runners_n <= 0:
+            raise InputError(f"{rw}.runners doit etre un entier positif")
+        if runners_n < HUMAN_AE_MIN_RUNNERS:
+            raise InputError(
+                f"{rw}.runners = {runners_n} sous le minimum {HUMAN_AE_MIN_RUNNERS}. "
+                "Un effet humain sur un denominateur aussi court n'est pas une "
+                "statistique, c'est une anecdote."
+            )
+        wins = require(record, "wins", rw)
+        if isinstance(wins, bool) or not isinstance(wins, int) or wins < 0:
+            raise InputError(f"{rw}.wins doit etre un entier positif ou nul")
+        if wins > runners_n:
+            raise InputError(f"{rw}.wins ({wins}) superieur au denominateur ({runners_n})")
+        expected = as_float(require(record, "expected_wins", rw), f"{rw}.expected_wins")
+        if expected <= 0.0:
+            raise InputError(
+                f"{rw}.expected_wins doit etre strictement positif: c'est la somme des "
+                "probabilites implicites des cotes de ces partants, sans quoi aucun "
+                "A/E n'est calculable."
+            )
+        if expected > runners_n:
+            raise InputError(
+                f"{rw}.expected_wins ({expected}) superieur au denominateur ({runners_n})"
+            )
+        observed_at = parse_iso(require(record, "observed_at", rw), f"{rw}.observed_at")
+        if observed_at > as_of:
+            raise InputError(f"Fuite temporelle: {rw}.observed_at posterieur a as_of")
+        require_text(require(record, "context", rw), f"{rw}.context")
+        # A/E. Le +0,5 au numerateur est une correction de continuite: sans elle
+        # une ecurie a zero victoire produit un log(0) et une contribution
+        # infiniment negative sur un echantillon qui peut etre court.
+        ae = (wins + 0.5) / (expected + 0.5)
+        ae = min(HUMAN_AE_MAX, ae)
+        shrink = runners_n / (runners_n + HUMAN_AE_SHRINK_PRIOR)
+        contribution = HUMAN_AE_BETA * math.log(ae) * shrink
+        total += contribution
+        parsed.append({
+            "scope": scope,
+            "window_days": window,
+            "runners": runners_n,
+            "wins": wins,
+            "expected_wins": round(expected, 3),
+            "a_over_e": round(ae, 4),
+            "shrink": round(shrink, 4),
+            "contribution": round(contribution, 4),
+        })
+    value = round(max(-cap, min(cap, total)), 4)
+    return {
+        "declared": True,
+        "n_records": len(parsed),
+        "records": parsed,
+        "value": value,
+        "raw_total": round(total, 4),
+        "capped": abs(total) > cap + 1e-12,
+        "note": (
+            "human_equipment est CALCULE depuis les A/E declares; une valeur "
+            "divergente fait echouer le scellement"
+        ),
     }
 
 
@@ -1434,12 +1840,32 @@ def build_class_ladder(
             else:
                 label = "CLASSE_STABLE"
             moves[number] = {"delta": round(delta, 3), "label": label}
+    margin_coverages = [
+        float(item.get("margin_coverage", 0.0)) for item in declared.values()
+    ]
+    mean_margin_coverage = float(np.mean(margin_coverages)) if margin_coverages else 0.0
     return {
         "active": True,
         "n_runners_with_history": len(declared),
         "median_rating": round(centre, 4),
         "interquartile_spread": round(spread, 4),
         "separates": separates,
+        # v11.10. Publie a quel point l'echelle repose sur des marges mesurees
+        # plutot que sur des rangs. A 0, le canal traite encore un 4e d'une
+        # encolure comme un 4e de quinze longueurs et il faut le dire.
+        "margin_coverage_mean": round(mean_margin_coverage, 4),
+        "n_runners_with_margin": sum(
+            1 for item in declared.values()
+            if float(item.get("margin_coverage", 0.0)) > 0.0
+        ),
+        "margin_note": (
+            "aucune longueur de battue declaree: le canal de classe lit des RANGS, "
+            "donc un 4e battu d'une encolure et un 4e battu de quinze longueurs y "
+            "sont identiques. C'est une approximation connue, pas une mesure."
+            if mean_margin_coverage <= 0.0 else
+            f"marges declarees sur {mean_margin_coverage:.0%} du poids de recence; "
+            "au-dela de cette part, les notes de sortie restent des rangs"
+        ),
         "ability_by_number": ability,
         "class_movement": moves,
         "separation_note": (
@@ -1556,9 +1982,8 @@ def validate_input(
     registry = validate_evidence_registry(raw, as_of)
     collection = validate_collection(raw, registry, as_of, fill_mode)
     (active, numbers, base_families, factor_families, runner_ids,
-     readings, form_lines, class_ladder, compression) = validate_runners(
-        raw, registry, as_of
-    )
+     readings, form_lines, class_ladder, compression,
+     human_records) = validate_runners(raw, registry, as_of)
     scenarios, scenario_ids = validate_scenarios(raw, numbers, registry, base_families, factor_families)
     validate_unknowns(raw, registry)
     simulation = validate_simulation(raw, allow_test_samples=allow_test_samples)
@@ -1581,6 +2006,7 @@ def validate_input(
         "collection": collection,
         "readings": readings,
         "form_lines": form_lines,
+        "human_records": human_records,
         "class_ladder": class_ladder,
         "handicap_compression": compression,
         "active": active,
@@ -3069,6 +3495,42 @@ def verify_journal(
 # 9. ABLATIONS - QUEL MODULE PORTE REELLEMENT DU SIGNAL
 # ---------------------------------------------------------------------------
 
+def reseat_declared_ability(variant: dict[str, Any]) -> None:
+    """Recopie dans le dossier l'ability_class que l'echelle calcule REELLEMENT.
+
+    Necessaire des qu'une variante d'ablation touche une entree de l'echelle de
+    classe sans vouloir neutraliser l'echelle elle-meme. Sans cela, la clause
+    anti-ecrasement de la v11.8 refuserait la variante, et le module serait le
+    seul qu'on ne saurait pas mesurer - exactement le defaut que la v11.8 avait
+    introduit pour ability_class et que la v11.9 a corrige.
+
+    On passe par validate_form_lines et build_class_ladder, jamais par une
+    reimplementation: une copie du calcul divergerait tot ou tard du calcul.
+    """
+    as_of = parse_iso(variant["race"]["as_of"], "race.as_of")
+    registry = validate_evidence_registry(variant, as_of)
+    form_by_number: dict[int, dict[str, Any]] = {}
+    active = [r for r in variant["runners"] if r.get("active") is True]
+    for idx, runner in enumerate(active):
+        form_by_number[int(runner["no"])] = validate_form_lines(
+            runner, registry, as_of, f"runners.active[{idx}]"
+        )
+    today_allocation = variant["race"].get("allocation_eur")
+    if today_allocation is not None:
+        today_allocation = float(today_allocation)
+    ladder = build_class_ladder(form_by_number, today_allocation)
+    computed = dict(ladder.get("ability_by_number", {}))
+    for number, item in form_by_number.items():
+        if item.get("declared") and number not in computed:
+            computed[number] = 0.0
+    for runner in active:
+        number = int(runner["no"])
+        if number in computed:
+            runner["score_components"]["ability_class"]["value"] = round(
+                float(computed[number]), 4
+            )
+
+
 def ablation_variants(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     variants: dict[str, dict[str, Any]] = {}
     for axis in LEVEL_CAPS:
@@ -3090,6 +3552,23 @@ def ablation_variants(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
             for channels in scenario["runner_adjustments"].values():
                 channels.pop(channel, None)
         variants[f"CANAL_{channel}"] = variant
+    # LONGUEUR DE BATTUE (v11.10). Variante dediee: on retire les marges SANS
+    # retirer l'historique, pour mesurer ce que la marge ajoute par-dessus le
+    # seul rang. Sans elle, la marge ne serait mesurable que confondue avec
+    # l'echelle de classe entiere, et l'on croirait le module sur parole.
+    margins = json.loads(json.dumps(raw))
+    stripped = False
+    for runner in margins["runners"]:
+        for line in runner.get("form_lines") or []:
+            if isinstance(line, dict) and line.pop("beaten_lengths", None) is not None:
+                stripped = True
+            if isinstance(line, dict):
+                line.pop("distance_m", None)
+    if stripped:
+        # Retirer les marges change l'ability_class que l'echelle calcule: il
+        # faut donc la recopier, sinon la variante echoue sur l'anti-ecrasement.
+        reseat_declared_ability(margins)
+        variants["MARGE_LONGUEURS"] = margins
     uniform = json.loads(json.dumps(raw))
     count = len(uniform["scenarios"])
     share = round(1.0 / count, 6)
@@ -4522,6 +5001,11 @@ def apply_scratch(
     if not removed:
         raise InputError("Aucun numero a retirer")
     updated = json.loads(json.dumps(raw))
+    raw_epistemic = {
+        int(r["no"]): float(r["epistemic_sd"])
+        for r in raw["runners"]
+        if r.get("active") is True and r.get("epistemic_sd") is not None
+    }
     active_before = {int(r["no"]) for r in updated["runners"] if r.get("active") is True}
     unknown = sorted(set(removed) - active_before)
     if unknown:
@@ -4569,10 +5053,76 @@ def apply_scratch(
                 runner["score_components"]["ability_class"]["value"] = (
                     recomputed["ability_by_number"].get(number, 0.0)
                 )
+    # v11.10. DEUXIEME MOITIE DU BUG DE NON-PARTANT, restee ouverte depuis la
+    # v11.8.2. Celle-ci avait corrige l'echelle de classe, qui est CALCULEE:
+    # retirer un partant deplace la mediane du peloton, donc tous les
+    # ability_class, et le moteur savait les recalculer.
+    #
+    # Le plancher d'incertitude a exactement la meme relativite, mais il porte
+    # sur epistemic_sd, qui est DECLARE. Retirer un partant peu incertain fait
+    # monter la mediane, donc le plancher, donc un dossier valide AVANT le
+    # retrait devient invalide APRES - alors que rien concernant le cheval gene
+    # n'a change. L'operateur se retrouvait alors, a T-60 et sous contrainte de
+    # temps, force d'inventer une valeur d'incertitude pour franchir une porte:
+    # c'est-a-dire exactement le jugement discretionnaire que toute
+    # l'architecture existe pour empecher.
+    #
+    # On porte donc la contrainte, dans le SEUL sens conservateur: on ELARGIT
+    # jusqu'au plancher, jamais on ne resserre. Un retrait detruit de
+    # l'information sur le peloton; il ne peut pas en creer. Toute correction
+    # est journalisee dans la note - une modification silencieuse d'une valeur
+    # declaree serait pire que le refus qu'elle remplace.
+    widened: list[dict[str, Any]] = []
+    if survivors:
+        as_of_dt = parse_iso(new_as_of, "new_as_of")
+        registry = updated.get("evidence_registry", {})
+        surviving_readings = {
+            number: validate_race_reading(runner, registry, as_of_dt, f"scratch[{number}]")
+            for number, runner in survivors.items()
+        }
+        surviving_forms = {
+            number: validate_form_lines(runner, registry, as_of_dt, f"scratch[{number}]")
+            for number, runner in survivors.items()
+        }
+        # Elargir un cheval deplace la mediane, donc les planchers des autres.
+        # On itere jusqu'au point fixe. Si la boucle ne converge pas - cas ou la
+        # MAJORITE du peloton devrait etre plus incertaine que sa propre mediane,
+        # ce qui est incoherent - on s'arrete et validate refusera en clair.
+        for _ in range(8):
+            current_eps = {
+                number: float(runner["epistemic_sd"])
+                for number, runner in survivors.items()
+            }
+            floors = epistemic_floors(current_eps, surviving_readings, surviving_forms)
+            changed = False
+            for number, detail in floors["by_number"].items():
+                target = min(1.80, float(detail["floor"]))
+                if current_eps[number] + 1e-12 < target:
+                    survivors[number]["epistemic_sd"] = round(target, 4)
+                    changed = True
+            if not changed:
+                break
+        for number, runner in survivors.items():
+            before = float(raw_epistemic.get(number, runner["epistemic_sd"]))
+            after = float(runner["epistemic_sd"])
+            if after > before + 1e-9:
+                widened.append({
+                    "no": number,
+                    "epistemic_sd_before": round(before, 4),
+                    "epistemic_sd_after": round(after, 4),
+                    "reason": floors["by_number"].get(number, {}).get("causes", []),
+                })
     note = {
         "removed": sorted(removed),
         "remaining_active": remaining,
         "new_as_of": new_as_of,
+        "epistemic_widened_after_scratch": widened,
+        "epistemic_widening_note": (
+            "le plancher d'incertitude est relatif au peloton: retirer un partant le "
+            "deplace. Les valeurs ci-dessus ont ete ELARGIES pour rester au-dessus du "
+            "nouveau plancher, jamais resserrees. Un retrait detruit de l'information, "
+            "il n'en cree pas."
+        ),
         "required_next_steps": [
             "relancer validate puis analyze sur le dossier reduit",
             "emettre un NOUVEL engagement commit chaine au precedent",
@@ -5540,6 +6090,314 @@ def self_test() -> None:
     )
     assert short["dispersion_increment"] == 0.0
     checks["form_dispersion_widens_uncertainty"] = True
+
+    # --- v11.10 longueur de battue --------------------------------------------
+    # Le defaut le plus grossier de la v11.9: un 4e battu d'une encolure et un
+    # 4e battu de quinze longueurs recevaient la MEME note de sortie.
+    stamp_hist = "2026-06-15T12:00:00+02:00"
+    as_of_probe = parse_iso("2026-08-21T12:00:00+02:00", "x")
+    reg_probe = {"E": {"tier": "F-S1"}}
+
+    def margin_probe(**extra: Any) -> dict[str, Any]:
+        line = {"evidence_id": "E", "race_date": stamp_hist,
+                "allocation_eur": 40000.0, "category": "HANDICAP",
+                "field_size": 12, "finish_position": 4, "distance_m": 1600.0}
+        line.update(extra)
+        return validate_form_lines(
+            {"form_lines": [line]}, reg_probe, as_of_probe, "margin"
+        )
+
+    close = margin_probe(beaten_lengths=0.3)
+    thrashed = margin_probe(beaten_lengths=15.0)
+    rank_only = validate_form_lines(
+        {"form_lines": [{"evidence_id": "E", "race_date": stamp_hist,
+                         "allocation_eur": 40000.0, "category": "HANDICAP",
+                         "field_size": 12, "finish_position": 4}]},
+        reg_probe, as_of_probe, "rank",
+    )
+    # Meme place, meme peloton, meme allocation: seule la marge change.
+    assert close["rating"] > thrashed["rating"], (close["rating"], thrashed["rating"])
+    assert close["margin_coverage"] == 1.0
+    assert rank_only["margin_coverage"] == 0.0
+    # Retro-compatibilite stricte: sans marge, la note est celle de la v11.9.
+    assert abs(rank_only["rating"] - round(
+        outing_rating(40000.0, 4, 12), 4)) < 1e-9
+    # La marge encadre le rang, elle ne le remplace pas: un 4e d'une encolure ne
+    # depasse pas un vainqueur, un 4e de quinze longueurs ne tombe pas sous un
+    # dernier. C'est ce que borne MARGIN_WEIGHT.
+    assert margin_probe(finish_position=1, field_size=12,
+                        beaten_lengths=0.0)["rating"] > close["rating"]
+    # La normalisation par la distance: cinq longueurs sur 1200 m coutent plus
+    # que cinq longueurs sur 2800 m.
+    assert (margin_probe(beaten_lengths=5.0, distance_m=1200.0)["rating"]
+            < margin_probe(beaten_lengths=5.0, distance_m=2800.0)["rating"])
+    # Plafond bas: au-dela de la reference, "battu de trente" et "battu de
+    # quarante" ne se distinguent plus - c'est du bruit de fin de course.
+    assert (margin_probe(beaten_lengths=30.0)["rating"]
+            == margin_probe(beaten_lengths=40.0)["rating"])
+
+    def margin_must_refuse(label: str, **extra: Any) -> None:
+        try:
+            margin_probe(**extra)
+        except InputError:
+            return
+        raise AssertionError(f"Refus attendu non declenche: {label}")
+
+    # Sondes adverses sur l'entree nouvelle.
+    margin_must_refuse("marge negative", beaten_lengths=-1.0)
+    margin_must_refuse("marge non numerique", beaten_lengths="courte tete")
+    margin_must_refuse("marge hors plage", beaten_lengths=1000.0)
+    margin_must_refuse("marge non finie", beaten_lengths=float("nan"))
+    margin_must_refuse("vainqueur battu de longueurs",
+                       finish_position=1, beaten_lengths=2.0)
+    margin_must_refuse("distance sans marge", distance_m=1600.0)
+    margin_must_refuse("distance hors plage", beaten_lengths=2.0, distance_m=50.0)
+    margin_must_refuse("distance non numerique", beaten_lengths=2.0, distance_m="mile")
+    checks["margin_separates_close_from_beaten"] = True
+
+    # Absence de marge: elargit l'incertitude RELATIVEMENT au peloton, et ne
+    # touche jamais au niveau. Meme regle que l'incident de parcours.
+    margin_field = json.loads(json.dumps(aligned_form))
+    for position, runner_block in enumerate(margin_field["runners"]):
+        # Tous documentent leur marge SAUF le premier.
+        if position:
+            runner_block["form_lines"][0]["beaten_lengths"] = 2.0 + position
+            runner_block["form_lines"][0]["distance_m"] = 1600.0
+    margin_ladder = build_class_ladder(
+        {
+            runner_block["no"]: validate_form_lines(
+                runner_block, margin_field["evidence_registry"],
+                parse_iso(margin_field["race"]["as_of"], "as_of"), "probe"
+            )
+            for runner_block in margin_field["runners"]
+        },
+        52000.0,
+    )
+    for runner_block in margin_field["runners"]:
+        runner_block["score_components"]["ability_class"]["value"] = (
+            margin_ladder["ability_by_number"][runner_block["no"]]
+        )
+    # Le cheval sans marge garde l'epistemic_sd du peloton: refus attendu.
+    must_refuse(margin_field, "marge moins documentee que le peloton sans elargissement")
+    widened = json.loads(json.dumps(margin_field))
+    widened["runners"][0]["epistemic_sd"] = 0.35 + MARGIN_EPISTEMIC_MAX + 0.01
+    ok_widened = validate_input(widened, current=current, allow_test_samples=True)
+    assert ok_widened["class_ladder"]["margin_coverage_mean"] > 0.0
+    # Personne ne documente: aucun differentiel, aucun refus, comportement v11.9.
+    assert validate_input(
+        aligned_form, current=current, allow_test_samples=True
+    )["class_ladder"]["margin_coverage_mean"] == 0.0
+    checks["margin_absence_widens_uncertainty"] = True
+
+    # Ablatable, sinon c'est un module qu'on croit sur parole.
+    margin_variants = ablation_variants(widened)
+    assert "MARGE_LONGUEURS" in margin_variants
+    stripped_lines = [
+        line for runner_block in margin_variants["MARGE_LONGUEURS"]["runners"]
+        for line in (runner_block.get("form_lines") or [])
+    ]
+    assert all("beaten_lengths" not in line for line in stripped_lines)
+    # La variante doit VALIDER: retirer la marge change l'ability_class calculee,
+    # et sans recopie elle echouerait sur la clause anti-ecrasement - le defaut
+    # exact que la v11.8 avait introduit pour ability_class.
+    validate_input(
+        margin_variants["MARGE_LONGUEURS"], current=current, allow_test_samples=True
+    )
+    assert "MARGE_LONGUEURS" not in ablation_variants(aligned_form)
+    checks["margin_channel_is_ablatable"] = True
+
+    # --- v11.10 effets humains en A/E -----------------------------------------
+    # Un taux de reussite mesure la qualite des chevaux confies; l'A/E mesure ce
+    # que l'entourage ajoute au prix. La v11.9 laissait entrer un chiffre libre.
+    human_base = json.loads(json.dumps(aligned_form))
+    human_base["runners"][0]["score_components"]["human_equipment"] = {
+        "value": 0.20, "evidence_ids": [],
+    }
+    must_refuse(human_base, "human_equipment non nul sans enregistrement A/E")
+
+    ae_url = "https://www.france-galop.com/fr/statistiques"
+    human_ok = json.loads(json.dumps(aligned_form))
+    human_ok["collection"]["sources"].append({
+        "url": ae_url, "fetched_at": stamp, "price_bearing": False,
+        "purpose": "statistiques A/E entraineur",
+    })
+    human_ok["evidence_registry"]["AE-1"] = {
+        "tier": "F-S1", "family_id": "AE-ENTRAINEUR-1",
+        "summary": "A/E entraineur sur 90 jours", "source_url": ae_url,
+        "observed_at": stamp, "available_at": stamp, "parent_ids": [],
+    }
+    ae_record = {
+        "evidence_id": "AE-1", "scope": "TRAINER", "window_days": 90,
+        "runners": 420, "wins": 68, "expected_wins": 48.0,
+        "observed_at": stamp, "context": "plat, handicaps de classe 2 et 3",
+    }
+    human_ok["runners"][0]["human_records"] = [ae_record]
+    computed_human = validate_human_records(
+        human_ok["runners"][0], human_ok["evidence_registry"],
+        parse_iso(human_ok["race"]["as_of"], "as_of"), "probe",
+    )
+    assert computed_human["declared"] is True
+    assert computed_human["value"] > 0.0        # A/E > 1 credite
+    assert computed_human["records"][0]["a_over_e"] > 1.0
+    # Le collecteur ne peut plus imposer son jugement.
+    must_refuse(human_ok, "human_equipment en desaccord avec l'A/E calcule")
+    human_ok["runners"][0]["score_components"]["human_equipment"] = {
+        "value": computed_human["value"], "evidence_ids": ["AE-1"],
+    }
+    validated_human = validate_input(human_ok, current=current, allow_test_samples=True)
+    assert validated_human["human_records"][1]["value"] == computed_human["value"]
+
+    # Un A/E sous 1 doit COUTER: c'est tout l'interet de la mesure.
+    cold = json.loads(json.dumps(human_ok))
+    cold["runners"][0]["human_records"][0].update({"wins": 20, "expected_wins": 45.0})
+    cold_value = validate_human_records(
+        cold["runners"][0], cold["evidence_registry"],
+        parse_iso(cold["race"]["as_of"], "as_of"), "probe",
+    )["value"]
+    assert cold_value < 0.0
+    checks["human_effects_require_ae"] = True
+
+    # Retrecissement par denominateur: un A/E de 1,60 sur 25 partants pese moins
+    # qu'un A/E de 1,08 sur 1500. C'est le failure mode dominant du domaine.
+    def ae_value(runners_n: int, wins: int, expected: float) -> float:
+        probe = json.loads(json.dumps(human_ok))
+        probe["runners"][0]["human_records"][0].update(
+            {"runners": runners_n, "wins": wins, "expected_wins": expected}
+        )
+        return validate_human_records(
+            probe["runners"][0], probe["evidence_registry"],
+            parse_iso(probe["race"]["as_of"], "as_of"), "probe",
+        )["value"]
+
+    assert ae_value(1500, 240, 150.0) > ae_value(40, 10, 6.25)
+
+    def human_must_refuse(label: str, **patch: Any) -> None:
+        probe = json.loads(json.dumps(human_ok))
+        record = dict(ae_record)
+        record.update(patch)
+        for key, value in list(record.items()):
+            if value is None:
+                record.pop(key)
+        probe["runners"][0]["human_records"] = [record]
+        try:
+            validate_human_records(
+                probe["runners"][0], probe["evidence_registry"],
+                parse_iso(probe["race"]["as_of"], "as_of"), "probe",
+            )
+        except InputError:
+            return
+        raise AssertionError(f"Refus attendu non declenche: {label}")
+
+    # Sondes adverses sur l'entree nouvelle.
+    human_must_refuse("denominateur trop court", runners=10)
+    human_must_refuse("denominateur negatif", runners=-50)
+    human_must_refuse("denominateur non entier", runners=42.5)
+    human_must_refuse("victoires superieures au denominateur", wins=500)
+    human_must_refuse("victoires negatives", wins=-1)
+    human_must_refuse("attendu nul", expected_wins=0.0)
+    human_must_refuse("attendu negatif", expected_wins=-3.0)
+    human_must_refuse("attendu non numerique", expected_wins="beaucoup")
+    human_must_refuse("attendu superieur au denominateur", expected_wins=900.0)
+    human_must_refuse("fenetre hors liste", window_days=7)
+    human_must_refuse("fenetre absente", window_days=None)
+    human_must_refuse("perimetre inconnu", scope="ASTROLOGIE")
+    human_must_refuse("contexte absent", context=None)
+    human_must_refuse("preuve inconnue du registre", evidence_id="AE-INEXISTANT")
+    human_must_refuse("observation posterieure a as_of",
+                      observed_at="2027-01-01T12:00:00+01:00")
+    # Un bruit de piste est un tier H: il peut ouvrir un scenario, jamais
+    # deplacer un niveau.
+    rumour = json.loads(json.dumps(human_ok))
+    rumour["evidence_registry"]["AE-RUMEUR"] = {
+        "tier": "H", "family_id": "AE-RUMEUR", "summary": "propos d'entraineur",
+        "observed_at": stamp, "available_at": stamp, "parent_ids": ["PERF-1"],
+    }
+    rumour["runners"][0]["human_records"] = [dict(ae_record, evidence_id="AE-RUMEUR")]
+    try:
+        validate_human_records(
+            rumour["runners"][0], rumour["evidence_registry"],
+            parse_iso(rumour["race"]["as_of"], "as_of"), "probe",
+        )
+        raise AssertionError("Refus attendu non declenche: A/E adosse a un tier H")
+    except InputError:
+        pass
+    # Deux fenetres du meme perimetre compteraient deux fois la meme information.
+    duplicated = json.loads(json.dumps(human_ok))
+    duplicated["runners"][0]["human_records"] = [
+        dict(ae_record), dict(ae_record, window_days=30),
+    ]
+    try:
+        validate_human_records(
+            duplicated["runners"][0], duplicated["evidence_registry"],
+            parse_iso(duplicated["race"]["as_of"], "as_of"), "probe",
+        )
+        raise AssertionError("Refus attendu non declenche: perimetre A/E duplique")
+    except InputError:
+        pass
+    checks["human_ae_shrinks_with_denominator"] = True
+
+    # --- v11.10 : seconde moitie du bug de non-partant --------------------------
+    # DEFAUT PREEXISTANT, trouve en auditant la v11.9 livree. La v11.8.2 avait
+    # corrige l'echelle de classe, qui est CALCULEE. Le plancher d'incertitude a
+    # la meme relativite au peloton mais porte sur epistemic_sd, qui est DECLARE:
+    # retirer un partant peu incertain fait monter la mediane, donc le plancher,
+    # et un dossier valide AVANT le retrait etait refuse APRES - sans que rien
+    # concernant le cheval gene ait change. L'operateur devait alors inventer une
+    # incertitude a T-60 pour franchir la porte.
+    scratch_case = json.loads(json.dumps(raw))
+    bulletin = "https://www.france-galop.com/sites/default/files/bulletin.pdf"
+    scratch_case["collection"]["sources"].append({
+        "url": bulletin, "fetched_at": stamp, "price_bearing": False,
+        "purpose": "compte-rendu officiel",
+    })
+    scratch_case["evidence_registry"]["BULL-SC"] = {
+        "tier": "F-S1", "family_id": "BULLETIN-SC", "summary": "compte-rendu officiel",
+        "source_url": bulletin, "observed_at": stamp, "available_at": stamp,
+        "parent_ids": [],
+    }
+    scratch_case["runners"][0]["race_reading"] = {"readings": [{
+        "evidence_id": "BULL-SC", "source_class": "OFFICIEL", "observed_at": stamp,
+        "observed_role": "closer", "trouble": ["enferme"],
+    }]}
+    # Des epistemic_sd etales, pour que la mediane BOUGE a un retrait.
+    for position, runner_block in enumerate(scratch_case["runners"]):
+        runner_block["epistemic_sd"] = [0.35, 0.20, 0.22, 0.24, 0.60, 0.62, 0.64][position]
+    # On amene le cheval gene PILE a son plancher.
+    for _ in range(20):
+        try:
+            validate_input(scratch_case, current=current, allow_test_samples=True)
+            break
+        except InputError as exc:
+            found = re.search(r">= ([0-9.]+)", str(exc))
+            if not found:
+                raise
+            scratch_case["runners"][0]["epistemic_sd"] = float(found.group(1))
+    floor_before = float(scratch_case["runners"][0]["epistemic_sd"])
+    # Retrait d'un partant PEU incertain: la mediane monte, le plancher aussi.
+    reduced, scratch_note = apply_scratch(
+        scratch_case, [2], "2026-08-21T09:55:00+02:00"
+    )
+    # La reconstruction doit passer: c'est la promesse du protocole a T-60.
+    validate_input(reduced, current=current, allow_test_samples=True)
+    widened_entry = scratch_note["epistemic_widened_after_scratch"]
+    assert widened_entry, "le plancher a monte sans que l'incertitude soit portee"
+    assert widened_entry[0]["no"] == 1
+    # Sens conservateur UNIQUEMENT: on elargit, jamais on ne resserre.
+    assert widened_entry[0]["epistemic_sd_after"] > widened_entry[0]["epistemic_sd_before"]
+    survivors_after = {
+        int(r["no"]): float(r["epistemic_sd"])
+        for r in reduced["runners"] if r.get("active") is True
+    }
+    before_by_number = {
+        int(r["no"]): float(r["epistemic_sd"])
+        for r in scratch_case["runners"] if r.get("active") is True
+    }
+    assert all(survivors_after[n] >= before_by_number[n] - 1e-9 for n in survivors_after)
+    assert survivors_after[1] >= floor_before
+    # Retrait d'un partant TRES incertain: la mediane baisse, aucun elargissement.
+    _, quiet_note = apply_scratch(scratch_case, [5], "2026-08-21T09:55:00+02:00")
+    assert quiet_note["epistemic_widened_after_scratch"] == []
+    checks["scratch_carries_epistemic_floor"] = True
 
     # --- v11.9 compression du handicap ----------------------------------------
     tight_field = [{"active": True, "weight_kg": w} for w in (57.0, 56.5, 56.0, 55.5, 55.0)]
