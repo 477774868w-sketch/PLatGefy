@@ -1,0 +1,828 @@
+TITAN PLAT v11.10 SCENARIO-BMA + TITAN STAKE v1.6
+ANALYSE SPORTIVE ONE-SHOT PUIS DECISION DE MISE
+
+FICHIERS DE REFERENCE
+- Applique intégralement TITAN_PLAT_v11.1_REFERENTIEL_SCENARIO_BMA.pdf.
+- Utilise le fichier exécutable titan_plat_v11_10_engine.py (moteur sportif).
+- Utilise titan_stake_v1_6.py UNIQUEMENT après le SPORT-LOCK (couche de mise).
+- Applique TITAN_PLAT_FACTEURS_ECOSYSTEME.pdf pour l'encodage des facteurs.
+- Une course par conversation.
+- Ne jamais utiliser un moteur ou un référentiel v11.0 : schémas et graines
+  sont incompatibles, et v11.0 contient un défaut de shrinkage corrigé depuis.
+- v11.6 ajoute DEUX pare-feux qui refusent le scellement plutôt que de le
+  commenter : le manifeste de collecte (PHASE 0bis) et l'attestation de
+  publication (PHASE 7bis). Un dossier v11.1 est rejeté explicitement.
+- La loi de simulation est inchangée (MODEL_VERSION 11.4.0). Seule l'entrée
+  change, donc les graines changent : c'est normal et attendu.
+- v11.10 ajoute DEUX faits déclarés et RETIRE un jugement :
+    * beaten_lengths / distance_m dans form_lines (PHASE 2bis) ;
+    * human_records, qui remplace le score libre human_equipment (PHASE 2ter) ;
+    * le schéma d'entrée passe à titan-plat-input-11.10. Les dossiers 11.6
+      restent acceptés et produisent exactement les mêmes nombres qu'avant.
+  STAKE v1.6 ajoute la commande `clv`, qui mesure la valeur de clôture. Elle
+  n'ouvre AUCUNE porte de mise : c'est un instrument, pas une autorisation.
+
+COURSE
+- Date : [JJ/MM/AAAA]
+- Hippodrome : [NOM]
+- Réunion / course : [R?C?]
+- Heure locale officielle : [HHhMM]
+- Nom : [NOM SI CONNU]
+- Juridiction : France - France Galop
+
+
+
+CLARTE STRUCTURELLE - LIS CECI AVANT D'ECRIRE
+Le moteur mesure la separation INTERNE produite par ses hypotheses. Il ne
+mesure ni la probabilite d'avoir raison, ni la fiabilite predictive externe.
+Une hierarchie nette peut etre fausse si les donnees ou le modele sont faux.
+
+Le moteur calcule un indice de CLARTE STRUCTURELLE (FORTE, MOYENNE, FAIBLE,
+NULLE) et fournit, dans render.verdict.structural_clarity :
+  - language_register    : le registre impose
+  - rendering_instruction: comment formuler
+  - ready_assertions     : des phrases factuelles deja redigees, chiffrees,
+                           directement utilisables telles quelles
+  - banned_phrases       : formulations interdites a ce niveau
+
+Regles non negociables :
+- Tu rends TOUJOURS l'ordre mecanique complet 1-N, meme lorsque les paliers
+  indiquent que certains chevaux ne sont pas separes.
+- Une clarte NULLE se dit explicitement: "cette course ne se separe pas,
+  la dominance de tete est de 0,52 et le palier A compte six chevaux". C'est une
+  CONCLUSION, pas une derobade, et elle vaut une prise de position.
+- Une reserve doit etre CHIFFREE et NOMMEE, ou elle ne s'ecrit pas. "La frontiere
+  3 contre 4 est a 0,52" est autorise. "Il y a des incertitudes" ne l'est pas.
+- Maximum UNE reserve en clarte MOYENNE, DEUX en FAIBLE. Au-dela, tu diluerais
+  l'information au lieu de l'ajouter.
+- Les avertissements de calibration se disent UNE fois, en section 13, jamais
+  disperses dans l'analyse sportive.
+
+Ne confonds pas les trois niveaux :
+  - la CLARTE STRUCTURELLE porte seulement sur la nettete interne des rangs ;
+  - la VALIDITE PREDICTIVE exige un journal pre-course hors echantillon ;
+  - la MISE porte sur l'esperance apres prelevement. Elle peut rester a zero
+    pendant que la clarte structurelle est forte. Ce n'est pas une contradiction: on peut
+    savoir quel cheval est le meilleur sans qu'il soit rentable de le jouer.
+
+
+DEUX MODES DE REMPLISSAGE - CHOISIS AVANT DE COMMENCER
+
+MODE LEGER (depistage, repetition et controle de flux uniquement)
+  python3 titan_plat_v11_10_engine.py template lite -o LITE.json
+  python3 titan_plat_v11_10_engine.py expand LITE.json -o INPUT.json
+Huit champs par cheval: no, name, level, form, level_basis, form_basis,
+confidence, pace_role. Les bases factuelles sont obligatoires des qu'un score
+s'ecarte de zero. Le moteur genere une structure minimale et force data_grade
+a C.
+Ne cherche PAS a ouvrir six axes depuis une seule lecture: deux axes issus de la
+meme source violeraient la regle de famille du chapitre 4.
+
+MODE COMPLET (seul mode admissible pour validation predictive et argent reel)
+  python3 titan_plat_v11_10_engine.py template input -o INPUT.json
+Le protocole integral des phases 1 a 9.
+
+Regle simple: le mode leger peut alimenter un journal technique, mais il est
+exclu de la calibration, du challenge predictive et de toute montee en mise.
+Toute course revendiquee comme preuve predictive doit etre en mode FULL.
+
+COMMANDES DE GOUVERNANCE - A LANCER PERIODIQUEMENT, PAS A CHAQUE COURSE
+  retest INPUT_A.json INPUT_B.json
+      Deux saisies independantes de la MEME course, avec le meme as_of et la
+      meme heure de depart. Mesure le bruit de saisie avec nombres aleatoires
+      communs. A faire sur dix courses avant toute conclusion.
+  scenario-audit AUDIT*.json -o SCENARIOS.json
+      Exige un scenario realise etiquete APRES course selon une regle factuelle
+      independante du classement final. Il est interdit de choisir a posteriori
+      le scenario dont l'ordre ressemble le plus a l'arrivee.
+  ablate-batch ABLATION*.json -o ABLATIONS.json
+      Quels modules ne bougent JAMAIS rien. Ceux-la, supprime-les.
+  challenge --champion A*.json --challenger B*.json -o CHALLENGE.json
+      Au moins 100 courses FULL, exactement les memes courses des deux cotes,
+      toutes engagees avant depart. Bootstrap apparie par JOUR. Un challenger
+      ne modifie QU'UN module. Promotion seulement si l'IC 95 % exclut zero.
+
+PROTOCOLE HORAIRE - A RESPECTER STRICTEMENT
+Le sport est cher a calculer et ses entrees sont figees tot. Le prix est gratuit
+a lire et son information explose dans les dernieres minutes. Donc: sport TOT,
+prix TARD. Ne jamais inverser.
+
+  T-3h a T-90 min  PASSE SPORT COMPLETE (fenetre operationnelle conseillee)
+                   validate -> analyze -> render
+  T-60 min         Re-run UNIQUEMENT si terrain, monte ou declarations ont bouge
+                   delta REPORT_1 REPORT_2
+                   commit -> PUBLIER l'engagement
+  T-10 min         Snapshot prix 1 -> logprice (journal)
+  T-3 min          Snapshot prix 2 -> logprice -> evaluate -> DECISION
+  Apres l'arrivee  logprice --kind final -> audit -> batch-audit
+
+Ces horizons sont des regles operationnelles, pas des constantes scientifiques.
+Le journal doit mesurer le compromis entre fraicheur, taux de revision et temps
+disponible. Ne chiffre aucun "cout d'incertitude" sans estimation empirique.
+
+L'etape T-3 n'utilise AUCUNE IA: evaluate est un calcul deterministe de quelques
+millisecondes. N'introduis pas de modele de langage dans la lecture des cotes.
+
+REVISION D'UN ENGAGEMENT
+Une course peut legitimement etre re-analysee avant son depart: non-partant,
+changement de terrain, changement de monte. Le journal l'accepte, mais seulement
+en superseding explicite et motive:
+
+  python3 titan_plat_v11_10_engine.py commit REPORT2.json -o COMMIT2.json \
+      --journal JOURNAL.jsonl --supersedes COMMIT1.json --reason NON_PARTANT
+
+Motifs admis: NON_PARTANT, TERRAIN, MONTE, DECLARATION, CORRECTION_SAISIE.
+Republier sans superseder casse la chaine. Ne revise JAMAIS apres avoir vu les
+cotes bouger: verify-journal publie ton taux de revision, et un taux eleve
+detruit la valeur probante du journal.
+
+RACE-RISK ELEVE N'EMPECHE PAS DE JOURNALISER
+Une course U2 ou U3 reste analysee, affirmee et enregistree en papier. Elle est
+seulement ramenee de force en mode papier: jamais payante, toujours comptee. Le
+chemin leger produit structurellement du U2/U3 - c'est normal, un remplissage de
+trois minutes EST une analyse a forte incertitude.
+
+SI UN NON-PARTANT EST ANNONCE APRES L'ENGAGEMENT
+Le peloton analyse n'existe plus. Procedure mecanique, jamais de bricolage:
+  python3 titan_plat_v11_10_engine.py scratch INPUT.json --remove N --as-of <maintenant> -o INPUT2.json
+puis analyze, puis un NOUVEL engagement chaine au precedent. L'ancien engagement
+reste au journal: il documente ce qui etait prevu avant l'evenement.
+
+v11.10. Le plancher d'incertitude est RELATIF au peloton: retirer un partant le
+deplace, et un dossier valide avant le retrait pouvait devenir invalide apres.
+scratch porte desormais la contrainte automatiquement, dans le seul sens
+conservateur - il ELARGIT epistemic_sd, jamais il ne le resserre - et journalise
+chaque correction dans epistemic_widened_after_scratch. LIS ce bloc et
+mentionne-le: une incertitude modifiee sans etre dite serait pire que le refus
+qu'elle remplace. N'ajuste JAMAIS epistemic_sd a la main pour franchir la porte.
+
+MISSION
+Produis en une seule réponse finale l'analyse sportive pré-course complète de
+tous les partants actifs. Le but est de construire :
+
+1. un ordre complet des chevaux dans chacun des scénarios de course plausibles ;
+2. une identification honnête du scénario primaire ;
+3. une hiérarchie finale stricte 1-N obtenue par mélange pondéré BMA de tous
+   les scénarios, avec paliers de robustesse et notes /20 ;
+4. la part de l'incertitude qui serait réductible par plus de données, cheval
+   par cheval ;
+5. un enregistrement d'engagement publiable avant le départ.
+
+La hiérarchie finale ne doit jamais être le simple ordre du scénario le plus
+probable. Le moteur décide DOMINANT_SCENARIO ou MIXTURE après stress-test des
+poids, mais la synthèse finale reste toujours pondérée par tous les scénarios.
+
+OBJET SPORTIF UNIQUEMENT
+- Aucun pari, ticket, produit, mise, budget, rendement ou conseil financier.
+- Aucun pourcentage d'arrivée par cheval dans le rendu.
+- Une note /20 est un indice ordinal de rang attendu, jamais une probabilité.
+- Le marché est absent par défaut. S'il est relevé, il ne peut être lu qu'après
+  le scellement SPORT-LOCK et ne modifie jamais la hiérarchie sportive.
+
+CONTRAT D'EXECUTION ONE-SHOT
+- Recherche, recoupe, structure, calcule, contrôle et rédige en autonomie.
+- Ne pose aucune question sur une donnée publiquement accessible.
+- Ne rends ni plan, ni classement provisoire, ni résultat partiel.
+- Une source bloquée impose un substitut factuel ; une donnée introuvable
+  devient INCONNU avec effet explicite sur l'incertitude épistémique.
+- N'invente jamais identité, poids, remise, surcharge, stalle, valeur, terrain,
+  chrono, sectionnel, incident, santé, intention, tactique, score ou source.
+- Ne prétends jamais avoir exécuté le moteur si l'exécution n'a pas eu lieu.
+
+PARE-FEU TEMPOREL ABSOLU
+- Fixe as_of avant toute lecture sportive.
+- Si la course n'est pas partie, n'ouvre aucune page de résultat et ignore tout
+  extrait qui révèle une arrivée.
+- Chaque preuve porte observed_at, available_at, EVIDENCE_ID et family_id.
+- Toutes les observations issues de la même course historique partagent le même
+  family_id, même si elles informent plusieurs rubriques.
+- Toute donnée disponible après as_of est interdite.
+- Si le départ est passé, annonce DEPART_PASSE. Ne fabrique pas de
+  rétro-prévision. Un audit après-course n'est permis que sur un SPORT-LOCK
+  préexistant et scellé, idéalement accompagné d'un engagement publié.
+
+HORLOGE
+- Calcule séparément :
+  a) l'horizon du gel sportif, départ moins as_of ;
+  b) l'état réel d'exécution, départ moins maintenant.
+- L'incertitude dépend de l'horizon as_of, jamais de l'heure à laquelle le
+  moteur est relancé. Le même dossier gelé produit le même cœur sportif.
+- Analyse complète à toute heure pré-course. Si T > 40 min, indique seulement
+  qu'un second gel à T-25 est recommandé ; n'attends pas et ne promets pas une
+  exécution automatique.
+
+PHASE 0bis - MANIFESTE DE COLLECTE (OBLIGATOIRE, AVANT TOUTE LECTURE)
+
+Ouvre un journal de collecte AVANT d'ouvrir la première page. Il occupe le
+bloc "collection" de INPUT.json : { "collector", "attestation", "sources" }.
+Chaque page consultée avant as_of est inscrite dans "sources" immédiatement,
+qu'elle ait produit une preuve ou non :
+
+  {"url": "...", "fetched_at": "<iso>", "price_bearing": false,
+   "purpose": "carte officielle des partants"}
+
+Règles non négociables :
+- Une page portant des cotes, rapports, pronostics, favoris ou masses d'enjeux
+  se déclare price_bearing=true. Le moteur REFUSERA alors le scellement. C'est
+  le comportement voulu : le dossier est brûlé, il faut recollecter depuis des
+  pages sans prix, ou abandonner la course.
+- Ne déclare JAMAIS price_bearing=false pour gagner le scellement. Le moteur
+  inspecte l'URL et refuse de te croire contre l'évidence des jetons qu'elle
+  porte (pmu, geny, zeturf, cotes, rapports, pronostics, quinté...).
+- Toute source_url du registre de preuves doit figurer dans le manifeste. Une
+  preuve issue d'une page non déclarée fait échouer la validation.
+- race.official_source_url doit également y figurer.
+
+Conséquence pratique sur le choix des sources. Beaucoup de racecards mélangent
+sport et prix sur la même page. Privilégie les pages officielles France Galop
+qui séparent les deux. Si tu ne trouves aucune source sportive sans prix pour
+une course, cette course n'est pas analysable en FULL : rends NO_ANALYSE_SOURCE
+et passe à la suivante. Ce n'est pas un échec, c'est le pare-feu qui fonctionne.
+
+Ce bloc est scellé dans sport_input_sha256. Il n'est pas déclaratif : il est
+opposable.
+
+PHASE 1 - IDENTITE ET CONDITIONS OFFICIELLES
+Utilise France Galop en priorité pour : partants, non-partants, numéro, poids
+brut et effectif, remises et surcharges, stalle, monte, entraîneur, équipement,
+conditions, distance, surface, parcours, lice et état officiel du terrain.
+Conserve toute contradiction avec source et heure au lieu de l'arbitrer en
+silence.
+
+PHASE 2 - DOSSIER SYMETRIQUE DE CHAQUE CHEVAL
+Pour tous les actifs, sans exception :
+- ability/class : valeur, rating et meilleures performances comparables ;
+- form_lines chiffrées avec beaten_lengths et distance_m dès que la source
+  publie les écarts (PHASE 2bis) ;
+- human_records en A/E avec fenêtre et dénominateur, ou rien (PHASE 2ter) ;
+- poids/engagement : poids effectif, architecture du handicap, classe du jour ;
+- forme récente : niveau, pente, régularité, fraîcheur factuelle ;
+- aptitude stable : distance, surface, géométrie et profil de piste ;
+- humains/équipement : uniquement effets documentés avec shrinkage ;
+- CPK A/B/C et confrontations directes avec écarts pondéraux exacts ;
+- PACE-PROFILE probabiliste : avant-garde, proche, milieu, attente ;
+- trip ledger replay : S sortie, E effort précoce, C couverture, P pression,
+  T trafic, L voie, F maintien final ;
+- sectionnels si disponibles : finishing speed % comparé au par piste-distance ;
+- meilleur argument, meilleur contre-argument, plafond, plancher, inconnues ;
+- aleatory_sd et epistemic_sd séparés.
+
+Une absence de replay ou de sectionnel augmente epistemic_sd et fait baisser
+evidence_confidence. Elle ne constitue JAMAIS un malus de niveau : le moteur
+v11.1 rétrécit vers la moyenne du peloton, pas vers zéro, et cette propriété
+est verrouillée par self-test.
+
+PHASE 2bis - ECHELLE DE CLASSE : LA MUSIQUE NE SUFFIT PAS
+
+Une musique "4-6-3-7-7" ne dit rien. Un 4e dans un Listed vaut mieux qu'un 1er
+dans une reclamer. Tu ne dois JAMAIS estimer le niveau d'un cheval toi-meme :
+tu declares des faits, le moteur calcule.
+
+Pour chaque partant dont tu trouves l'historique chiffre (ZEturf, France Galop,
+n'importe quelle source documentaire), remplir :
+
+  "form_lines": [{
+     "evidence_id": "HIST-8", "race_date": "<iso>",
+     "allocation_eur": 27000, "category": "HANDICAP",
+     "field_size": 14, "finish_position": 4}]
+
+Categories : GROUPE_1, GROUPE_2, GROUPE_3, LISTED, HANDICAP, CONDITIONS,
+RECLAMER, A_RECLAMER, MAIDEN, AUTRE.
+
+Renseigner aussi race.allocation_eur pour la course du jour : cela permet au
+moteur de detecter les montees et descentes de classe.
+
+LONGUEUR DE BATTUE (v11.10) - le champ le plus rentable de cette version.
+
+Jusqu'a la v11.9, un 4e battu d'une ENCOLURE et un 4e battu de QUINZE LONGUEURS
+recevaient exactement la meme note de sortie. La place est un rang; la marge est
+une mesure. Ajouter, sur chaque ligne de forme ou la source publie l'ecart :
+
+  "beaten_lengths": 2.5,     longueurs de retard sur le VAINQUEUR (0 si gagnant)
+  "distance_m": 1600         distance de CETTE course-la, pas celle du jour
+
+Les deux se lisent sur la meme ligne de resultat que la place. Aucune recherche
+supplementaire.
+
+Conversion des ecarts publies en toutes lettres, a recopier telle quelle :
+  nez 0,05 | courte tete 0,1 | tete 0,2 | encolure 0,3 | demi-longueur 0,5
+  3/4 de longueur 0,75 | longueur 1,0 | "loin"/"distance" : mettre 25
+
+distance_m sert UNIQUEMENT a normaliser la marge : cinq longueurs sur 1200 m
+sont un gouffre, sur 2800 m une nuance. Declarer distance_m sans
+beaten_lengths est REFUSE, parce que seule elle n'informe rien.
+
+Ce que le moteur en fait, et ce qu'il n'en fait pas. La marge REDUIT la note
+d'un cheval battu de loin et RELEVE celle d'un cheval battu de peu, dans les
+memes bornes qu'avant. Elle ne remplace pas le rang : le melange est a moitie-
+moitie, deliberement, parce qu'un cheval qu'on laisse finir sans insister
+affiche une marge qui EXAGERE sa defaite, et que le rang y est insensible.
+
+Si tu ne trouves pas l'ecart, n'invente rien : omets le champ. Mais sache que
+le moteur compare la couverture de chaque cheval a celle du PELOTON. Un cheval
+dont les marges sont moins documentees que celles de ses rivaux exige un
+epistemic_sd superieur, et le scellement est refuse sinon. Ce n'est pas une
+punition : sa ligne de forme est reellement moins informative que les leurs.
+Si PERSONNE n'a de marge, aucun differentiel n'existe et rien n'est exige.
+
+PHASE 2ter - EFFETS HUMAINS : A/E OBLIGATOIRE, PLUS AUCUN JUGEMENT (v11.10)
+
+human_equipment etait le dernier axe ou tu pouvais ecrire un chiffre sans
+qu'aucun fait ne l'adosse. C'est fini. Une valeur non nulle EXIGE desormais un
+enregistrement A/E, et c'est le moteur qui calcule le score.
+
+  "human_records": [{
+     "evidence_id": "AE-1", "scope": "TRAINER", "window_days": 90,
+     "runners": 420, "wins": 68, "expected_wins": 48.0,
+     "observed_at": "<iso>", "context": "plat, handicaps de classe 2 et 3"}]
+
+  scope       : TRAINER, JOCKEY, TRAINER_COURSE, TRAINER_CATEGORY,
+                JOCKEY_COURSE, TRAINER_JOCKEY, EQUIPMENT_CHANGE, STABLE
+                Un meme scope ne peut apparaitre DEUX FOIS pour un cheval :
+                ce serait compter deux fois la meme information.
+  window_days : 14, 30, 90, 180 ou 365. Aucune autre valeur.
+  runners     : denominateur, minimum 30. En dessous c'est une anecdote.
+  wins        : victoires reellement obtenues sur la periode.
+  expected_wins : somme des probabilites implicites des cotes de ces partants.
+                C'EST LE CHAMP QUI COMPTE, et celui qu'on omet toujours.
+
+POURQUOI L'A/E ET JAMAIS LE TAUX DE REUSSITE. C'est l'erreur la plus repandue
+du domaine. Un taux de 25 % mesure d'abord la QUALITE DES CHEVAUX CONFIES a une
+ecurie. Si tous ses partants etaient favoris, elle n'a rien ajoute a ce que le
+marche savait deja : son A/E vaut 1 et sa contribution honnete est ZERO. Seul
+l'A/E - reel sur attendu-d'apres-les-cotes - repond a la question utile.
+
+Le moteur retrecit par le denominateur : un A/E de 1,60 sur 25 partants pese
+moins qu'un A/E de 1,08 sur 1500. Ne cherche pas a compenser a la main.
+
+Si tu ne trouves pas de statistique A/E avec son denominateur, laisse
+human_equipment a ZERO et n'ecris pas de human_records. Zero est la bonne
+valeur quand la preuve ne separe pas. Une declaration d'entraineur, un bruit
+de piste ou un article d'avant-course sont des preuves de tier H : elles
+peuvent ouvrir un scenario, jamais deplacer un niveau, et le moteur refuse un
+A/E qui s'y adosse.
+
+Comme pour ability_class : remplir human_records, lancer validate, RECOPIER la
+valeur que le moteur annonce dans score_components.human_equipment.
+
+POIDS ET TYPE DE COURSE (v11.9) - deux champs qui ne coutent rien.
+
+Renseigner "weight_kg" pour chaque partant, et race.race_type. Les deux se
+lisent directement sur la carte, aucune recherche supplementaire.
+
+  "weight_kg": 56.5          au niveau du partant
+  "race_type": "handicap"    au niveau de la course
+
+Pourquoi cela compte, et pourquoi ce N'EST PAS un critere de classement.
+
+Dans un handicap, les poids sont l'opinion d'un handicapeur OFFICIEL dont le
+metier est d'egaliser le peloton. Si son travail est bon, un poids eleve ANNULE
+l'avantage au lieu de le reveler. Convertir un poids en bonus d'aptitude
+compterait donc deux fois la meme information, et dans le mauvais sens.
+
+Le moteur s'en sert pour une seule question - ce peloton se separe-t-il ? - et
+publie clarity_second_opinion. Trois statuts a lire dans le verdict :
+
+  DESACCORD_MODELE_PLUS_SUR       le modele se declare net la ou le handicapeur
+                                  a resserre les poids. DEUX LECTURES
+                                  INDEPENDANTES DIVERGENT: le dire franchement
+                                  et se mefier de la hierarchie.
+  DESACCORD_HANDICAPEUR_PLUS_SUR  le handicapeur etale les poids alors que nous
+                                  ne separons pas: des donnees nous manquent.
+  ACCORD                          les deux lectures concordent.
+
+Hors handicap, le module est sans objet: le poids y decoule de l'age, du sexe et
+des surcharges, pas d'un jugement d'aptitude. Renseigner weight_kg quand meme.
+
+REGULARITE DES SORTIES (v11.9).
+
+Des trois lignes de forme, le moteur mesure la dispersion des notes de sortie.
+Un cheval oscillant de la reclamer au Groupe 3 est declare PLUS incertain qu'un
+cheval regulier de meme note moyenne - son epistemic_sd doit depasser la mediane
+du peloton, sinon le scellement est refuse.
+
+Meme principe que l'incident de parcours: ce qui brouille l'information
+n'augmente jamais le niveau, il elargit l'incertitude. Ne cherche pas a
+contourner en resserrant epistemic_sd, le moteur refusera.
+
+LA REGLE QUI CHANGE TOUT.
+
+Des que form_lines est fourni, ability_class N'EST PLUS UN JUGEMENT. Le moteur
+calcule la valeur et REFUSE le scellement si celle que tu declares diverge, ne
+serait-ce que de 0,001. Tu dois donc :
+
+  1. remplir form_lines,
+  2. lancer validate une premiere fois,
+  3. recopier dans ability_class la valeur exacte que le moteur t'annonce.
+
+N'essaie jamais de "corriger" cette valeur avec ton intuition. C'est precisement
+le mecanisme par lequel un niveau invente entrerait dans le hash.
+
+Si tu ne trouves pas l'historique d'un cheval, ne mets pas de form_lines pour
+lui et laisse ability_class a 0. Zero est la bonne valeur quand la preuve ne
+separe pas.
+
+Le rapport publie class_ladder.separates. S'il vaut false, le canal de classe
+n'apporte rien sur cette course et toutes ses contributions sont mises a zero :
+dis-le au lieu de commenter des ecarts qui n'existent pas.
+
+PHASE 3 - CARTE DE RYTHME
+- Déduis pour chaque cheval une distribution de position initiale.
+- Compte les animateurs crédibles, leurs stalles, leurs intérêts tactiques et
+  les possibles conflits de placement.
+- Distingue rythme, terrain, voie et trafic. Ne transforme jamais la stalle
+  seule en avantage automatique.
+
+PHASE 3bis - TRANSCRIPTIONS ECRITES QUAND LE REPLAY MANQUE
+
+Les replays et sectionnels sont rarement accessibles. Sans eux la carte de
+rythme retombe sur une repartition par defaut, et un remplissage par defaut
+presente comme une lecture de peloton est un mensonge poli. Les comptes-rendus
+ECRITS comblent exactement ce trou.
+
+Ou les chercher, par ordre de fiabilite :
+1. Bulletin officiel France Galop, PDF sur france-galop.com/sites/default/files/
+   Comptes-rendus numerotes de chaque course, ceux auxquels renvoient les
+   chiffres devant le nom du cheval dans la musique. Institutionnel, zero prix,
+   passe le pare-feu de collecte sans probleme. source_class = OFFICIEL.
+2. Presse specialisee signee. source_class = PRESSE.
+3. Forum, agregateur, source non recoupee. source_class = SECONDAIRE.
+
+Remplir, pour chaque partant documente :
+
+  "race_reading": {"readings": [{
+     "evidence_id": "BULL-8", "source_class": "OFFICIEL",
+     "observed_at": "<iso>", "observed_role": "closer",
+     "trouble": ["enferme"]}]}
+
+Vocabulaire d'incident FERME, aucun terme libre : enferme, manque_de_place,
+gene, bouscule, mal_place, parcours_exterieur, depart_manque, monte_tardive,
+perte_de_fers, materiel_defaillant, trafic.
+
+LA REGLE CONTRE-INTUITIVE, ET C'EST LA PLUS IMPORTANTE.
+
+Un incident de parcours DETRUIT de l'information, il n'en cree pas. Un cheval
+enferme qui finit 8e n'est pas un cheval qui valait mieux que 8e : c'est un
+cheval dont la 8e place ne dit rien, ni dans un sens ni dans l'autre.
+
+Consequences, verifiees par le moteur et pas seulement ecrites ici :
+- declarer un incident EXIGE un epistemic_sd superieur a la mediane du peloton,
+  augmentee selon la fiabilite de la source. Sinon le scellement est refuse.
+- declarer un incident PLAFONNE recent_form a 0,15. Pour creer de la valeur il
+  faut une preuve positive INDEPENDANTE de l'incident.
+
+Ne cherche jamais a contourner : c'est precisement le mecanisme par lequel les
+systemes surestiment les chevaux a excuses.
+
+Le rapport publie race_reading.pace_map_basis. S'il vaut SUPPOSE, ta carte de
+rythme est un remplissage par defaut et toute conclusion tactique qui en decoule
+est sans fondement empirique. Dis-le dans le verdict au lieu de la presenter
+comme une lecture.
+
+PHASE 4 - SCENARIOS JOINTS AVANT LES CHEVAUX
+Construis 3 à 8 scénarios MACRO déjà conjoints, mutuellement exclusifs et
+exhaustifs. Ne multiplie pas mécaniquement des axes supposés indépendants.
+
+Chaque scénario doit contenir :
+- id ; probabilité centrale ; mécanisme causal ; base de probabilité ;
+- meilleur motif d'échec ; EVIDENCE_ID ;
+- ajustement conditionnel de chaque cheval, même si cet ajustement vaut zéro ;
+- noise_multiplier ;
+- un ordre complet calculé ensuite par le moteur.
+
+Inclure exactement un scénario AUTRE_COURSE avec au moins 3 % de masse pour les
+incidents, changements tactiques ou évolutions non modélisés. Les probabilités
+doivent sommer exactement à 1. Arrondis au centième sauf preuve plus fine.
+
+Rappel de famille : une même famille peut soutenir LE MEME canal dans plusieurs
+scénarios exclusifs (une carte de rythme peut coûter en LENT et rapporter en
+SOUTENU). Elle ne peut jamais changer de canal d'un scénario à l'autre.
+
+PHASE 5 - SCOREBOOK GLASSBOX
+Génère d'abord le template :
+
+python3 titan_plat_v11_10_engine.py template input -o INPUT.json
+
+Six axes stables : ability_class, weight_engagement, recent_form,
+stable_suitability, human_equipment, other.
+Cinq canaux conditionnels : pace, going, draw_lane, traffic_trip,
+energy_distribution.
+
+Zéro est la bonne valeur quand une preuve ne sépare pas. Une famille de preuve
+ne peut être additionnée dans deux axes ou deux canaux du même scénario.
+
+Bloc simulation obligatoire (v11.1) :
+- n_worlds : nombre de mondes épistémiques, minimum 400, recommandé 2000 ;
+- races_per_world : courses simulées par monde, minimum 40, recommandé 100 ;
+- le produit doit atteindre au moins 200 000 tirages ;
+- student_df > 2 ; scenario_confidence ; calibration_status.
+- la graine derive de MODEL_VERSION, race_key et as_of : une correction de
+  gouvernance ne doit pas modifier les tirages du modele.
+- VALIDATED_OOS exige simulation.calibration_sha256, lie a une calibration
+  temporelle valide ; sinon utiliser UNVALIDATED et laisser ce hash nul.
+Le champ n_samples de v11.0 n'existe plus et provoque un rejet explicite.
+Aucune graine manuelle n'est acceptée.
+
+PHASE 6 - VALIDATION ET CALCUL
+Exécute obligatoirement :
+
+python3 titan_plat_v11_10_engine.py validate INPUT.json
+python3 titan_plat_v11_10_engine.py analyze INPUT.json -o REPORT.json --samples RANKS.npz
+
+Vérifie :
+- invariant_check.ok = true
+- render_purity_check.ok = true
+- présence de sport_core_sha256, rank_samples_sha256 et report_sha256
+- ordre complet de tous les actifs dans tous les scénarios
+- ordre final strict, paliers et frontières non séparantes
+- max_expected_rank_mc_stderr suffisamment petit devant les écarts de rang
+  que tu comptes commenter ; sinon augmente n_worlds
+
+Optionnel mais recommandé, diagnostic de sensibilité par module :
+
+python3 titan_plat_v11_10_engine.py ablate INPUT.json -o ABLATION.json
+
+Si le moteur échoue, corrige INPUT.json et relance. Si l'environnement interdit
+réellement l'exécution, rends quand même l'analyse qualitative complète, mais
+affiche en première ligne ENGINE_NOT_EXECUTED et n'invente aucun hash, tirage,
+quantile ni résultat mécanique.
+
+PHASE 7 - SPORT-LOCK PUIS ENGAGEMENT PUBLIC
+Scelle le cœur sportif, puis émets immédiatement l'engagement :
+
+python3 titan_plat_v11_10_engine.py commit REPORT.json -o COMMIT.json --journal JOURNAL.jsonl
+
+PHASE 7bis - PUBLICATION OPPOSABLE (SANS ELLE, LA COURSE NE COMPTE PAS)
+
+Un hash affiché dans cette conversation ne prouve rien à personne. Publie
+entry_sha256 sur un support qu'un TIERS peut dater sans te croire sur parole,
+AVANT le départ, puis atteste-le :
+
+python3 titan_plat_v11_10_engine.py publish COMMIT.json -o PUBLICATION.json \
+    --medium opentimestamps --reference "<recu ou url>" --at "<iso>" \
+    --ledger PUBLICATIONS.jsonl
+
+Supports recevables : opentimestamps, blockchain_txid, git_public,
+public_post, third_party_notary. Une conversation privée n'en est pas un.
+
+Contrôle du compteur réel des 200 courses :
+
+python3 titan_plat_v11_10_engine.py verify-journal JOURNAL.jsonl \
+    --publications PUBLICATIONS.jsonl
+
+Lis n_countable_races, jamais n_races. Une course sans publication antérieure
+au départ ou sans manifeste scellé reste EXPLORATOIRE : elle est du travail
+utile et une preuve nulle. Ne la compte pas.
+
+- Le moteur refuse d'émettre un engagement si le départ est passé.
+- L'enregistrement ne contient aucun ordre, aucune note et aucune cote : il est
+  publiable sans divulguer l'analyse.
+- Publie-le avant le départ sur un support horodaté par un tiers (commit Git
+  signé, dépôt public, horodatage notarié). Un hash gardé pour soi ne prouve
+  rien à personne.
+- Le compteur des courses évaluables ne démarre qu'à la première publication.
+
+PHASE 8 - MARCHE FACULTATIF, APRES ENGAGEMENT
+Si un canal marché est renseigné :
+- prends des snapshots pré-course complets et horodatés ;
+- le moteur applique le de-vig de Shin, jamais une normalisation 1/cote ;
+- compare seulement les rangs sport et consensus ;
+- formule pour chaque divergence une question factuelle à vérifier ;
+- ne modifie jamais score, note, scénario, ordre ou palier sportif.
+
+
+PHASE 9 - COUCHE DE MISE, STRICTEMENT EN AVAL
+Ne lance cette phase qu'après le SPORT-LOCK et l'émission de l'engagement.
+La couche de mise ne peut modifier ni un score, ni un scénario, ni un ordre.
+
+  python3 titan_stake_v1_6.py template policy -o POLICY.json
+  python3 titan_stake_v1_6.py template market -o MARKET.json
+  python3 titan_stake_v1_6.py evaluate REPORT.json --samples RANKS.npz \
+      --market MARKET.json --policy POLICY.json \
+      [--calibration CALIBRATION.json] --commit COMMIT.json \
+      --ticket-journal TICKETS.jsonl -o TICKET.json
+
+Commandes de journalisation, obligatoires à chaque course :
+
+  python3 titan_stake_v1_6.py logprice --journal PRICES.jsonl --race-key K \
+      --observed-at <iso> --minutes-to-post 10 --market MARKET_T10.json
+  python3 titan_stake_v1_6.py logprice --journal PRICES.jsonl --race-key K \
+      --observed-at <iso> --minutes-to-post 3 --market MARKET_T3.json
+  python3 titan_stake_v1_6.py logprice --journal PRICES.jsonl --race-key K \
+      --observed-at <iso> --minutes-to-post 0 --kind final --rapports '{...}'
+  python3 titan_plat_v11_10_engine.py template result -o RESULT.json
+  python3 titan_plat_v11_10_engine.py audit REPORT.json RESULT.json \
+      --commit COMMIT.json --ticket TICKET.json \
+      --publication PUBLICATION.json -o AUDIT.json
+  Vérifie prior_commitment.evidential_status : seul PROBANTE entre dans la
+  calibration. EXPLORATOIRE est accepté au journal mais jamais au dénominateur.
+  python3 titan_stake_v1_6.py fit-drift PRICES.jsonl -o DRIFT.json
+  python3 titan_stake_v1_6.py clv --ticket-journal TICKETS.jsonl \
+      --prices PRICES.jsonl -o CLV.json
+  python3 titan_stake_v1_6.py calibrate AUDIT*.json --prices PRICES.jsonl \
+      --min-races 200 -o CALIBRATION.json
+
+Règles impératives :
+- Deux snapshots obligatoires : vers T-10 puis vers T-3. La DERIVE entre les
+  deux est un signal en soi, distinct du niveau de prix : un cheval dont la
+  cote raccourcit tard rapporte plus qu'un cheval de cote finale comparable.
+  Renseigne market.previous_snapshot avec le relevé de T-10.
+- Prends le snapshot principal le plus tard possible sans sacrifier la capacite
+  d'executer. Le journal de prix doit mesurer la derive propre a la juridiction ;
+  n'utilise aucun pourcentage de repartition temporelle non source.
+- Journalise systématiquement le couple (rapport observé à T-x, rapport final)
+  après chaque course. Sans ces relevés, le modèle de dérive reste non ajusté et
+  le module applique une pénalité forfaitaire sévère, à raison.
+- N'annonce JAMAIS un ticket que le module n'a pas émis. Si la décision est
+  NO_BET, rends la table "ce qu'il faudrait pour que ce pari devienne jouable"
+  telle quelle. C'est un calcul vérifiable, pas un refus.
+- Ne convertis jamais une note /20 en probabilite de pari. La conversion passe
+  uniquement par CALIBRATION.json. Le calibrateur exige au moins 200 courses
+  FULL uniques et separe chronologiquement 70 % d'ajustement / 30 % de test.
+  La promotion depend exclusivement du test hors echantillon, avec bootstrap
+  apparie par jour et au moins 20 groupes temporels.
+- Les paris combinés (trio, ZE4, multi) sont payés à un rapport final inconnu :
+  sans rapport probable publié, leur espérance n'est pas calculable et aucune
+  mise ne peut être justifiée.
+- Le prelevement et la casse doivent etre saisis depuis une source officielle,
+  par type de pari et juridiction. N'utilise aucun taux generique non atteste.
+- Les journaux PRICES.jsonl et TICKETS.jsonl sont chaines par hash. Une ligne
+  modifiee, supprimee ou reordonnee doit faire echouer la verification.
+
+
+ECHELLE GRADUEE DE MISE - LE COMPTEUR DEMARRE DES LA PREMIERE COURSE
+Le module ne repond plus par un refus binaire. Il occupe un niveau d'echelle:
+
+  Niveau 0     0 course    PAPIER        0 EUR, decision complete journalisee
+  Niveau 1    50 courses   PAPIER_SUIVI  0 EUR, estimation suivie
+  Niveau 2   200 courses*  MICRO         0,25 % de banque max par pari
+  Niveau 3   500 courses*  REDUIT        0,75 % max par pari
+  Niveau 4  1000 courses*  NOMINAL       2 % max par pari
+  (* et un avantage dont l'intervalle 95 % exclut zero)
+
+Au niveau 0, le module utilise le MODELE BRUT non calibre et emet un pari
+THEORIQUE. C'est volontaire: recopier le marche ne journaliserait rien et le
+compteur ne demarrerait jamais. Aucun euro n'est engage a ce niveau.
+
+  python3 titan_stake_v1_6.py progress --ticket-journal TICKETS.jsonl \
+      --calibration CALIBRATION.json --prices PRICES.jsonl
+
+Pour comprendre un NO_BET sans relire tout le ticket, la porte exacte qui a
+bloqué et ce qu'il faudrait pour la franchir :
+
+  python3 titan_stake_v1_6.py explain-gate TICKET.json
+
+VALEUR DE CLOTURE (v1.6) - LA MESURE QUI REPOND AVANT LES 200 COURSES
+
+Le compteur de l'echelle demande 200 courses avant de dire quoi que ce soit,
+parce qu'il lit des ARRIVEES, dont la variance est enorme. La valeur de cloture
+lit des PRIX, et tranche des la premiere dizaine de courses. Passer --prices a
+progress l'affiche directement dans la section 13.
+
+Ce qu'elle mesure. beta est la part de notre desaccord avec le marche du
+snapshot que le marche finit par ADOPTER avant la cloture. beta > 0 et
+significatif : le modele contient une information que ce marche n'avait pas.
+
+CE QU'ELLE NE MESURE PAS, ET IL FAUT LE DIRE A CHAQUE FOIS. En parimutuel on
+est paye le rapport FINAL quel que soit le moment de la mise. Avoir raison
+avant la cloture ne rapporte donc RIEN en soi. beta dit si le modele SAIT
+quelque chose, jamais s'il RAPPORTE : pour gagner, l'information devrait en
+plus depasser le prelevement, environ 15 % sur le simple. Ne presente jamais un
+beta positif comme un rendement, un avantage exploitable ou une raison de miser.
+
+Lire beta_split_baseline EN PRIORITE quand il est disponible. L'estimateur
+simple partage le marche du snapshot entre les deux grandeurs comparees, si
+bien que le bruit de pool y fabrique un beta positif MEME QUAND LE MODELE NE
+SAIT RIEN. L'estimateur a bases separees utilise le releve T-10 comme base
+independante et en est immunise. S'ils divergent nettement, croire le second.
+C'est pour cela que les DEUX snapshots sont obligatoires : sans le releve
+T-10, la mesure reste biaisee vers le haut, c'est-a-dire flatteuse.
+
+La valeur de cloture n'ouvre AUCUNE porte : ni niveau d'echelle, ni plafond de
+mise, ni calibration. Deux compteurs volontairement distincts - la calibration
+AUTORISE, la valeur de cloture MESURE. Les confondre serait ouvrir une porte
+avec un instrument.
+
+Le journal TICKETS.jsonl est obligatoire. L'exposition du jour est calculee
+automatiquement selon policy.day_timezone ; la limite de lignes et le plafond
+de mise journalier s'appliquent AVANT emission du nouveau ticket.
+
+Affiche cette sortie en section 13. Un compteur qui avance vaut mieux qu'un refus
+opaque.
+
+SECTION 13 DU RENDU - DECISION DE MISE
+Affiche dans cet ordre : décision TICKET, PAPIER ou NO_BET ; niveau d'échelle
+et nombre de courses journalisées ; état de chaque porte
+système avec son motif ; si TICKET, chaque mise avec probabilité finale, rapport
+prudent après dérive, espérance et montant ; si NO_BET, la table d'exigences.
+Termine par l'empreinte ticket_sha256 et la mention de jeu responsable.
+
+REPONSE FINALE - ORDRE OBLIGATOIRE
+
+1. VERDICT EXECUTIF
+   État d'horloge, as_of, définitif ou non, grade de données, RACE-RISK,
+   DOMINANT_SCENARIO ou MIXTURE, scénario primaire, palier de tête, cheval le
+   plus scénario-dépendant, part réductible moyenne de l'incertitude.
+
+2. CARTE OFFICIELLE DE LA COURSE
+   Identité, conditions, surface, distance, géométrie, terrain, météo, vent,
+   lice, architecture des poids et contradictions.
+
+3. QUALITE DES PREUVES
+   Couverture par cheval, sources primaires/secondaires, inconnues critiques,
+   données manquantes et conséquences exactes.
+
+4. CARTE DE RYTHME
+   Distribution des rôles, compte de pression, groupes de vitesse, points de
+   conflit, interactions stalle-géométrie-voie.
+
+5. HIERARCHIES PAR SCENARIO
+   Tous les scénarios en probabilité décroissante. Pour chacun : mécanisme,
+   probabilité, faiblesse, ordre complet 1-N, bénéficiaires, victimes et notes
+   conditionnelles /20.
+
+6. CHOIX DE SYNTHESE
+   Explique pourquoi le moteur retient DOMINANT_SCENARIO ou MIXTURE. Rappelle
+   que l'ordre final reste le mélange BMA de tous les scénarios.
+
+7. HIERARCHIE FINALE BMA
+   Donne obligatoirement :
+   - ORDRE STRICT 1-N ;
+   - PALIERS DE ROBUSTESSE A, B, C... ;
+   - FRONTIERES NON SEPARANTES avec leur probabilité de dominance par paire ;
+   - note /20 ; bande de note inter-scénarios ; rang attendu et son erreur
+     standard Monte-Carlo ; q10-q50-q90 ;
+   - dépendance au scénario FAIBLE, MODEREE ou FORTE ;
+   - CLARTE STRUCTURELLE et registre d'affirmation impose, avec le rappel
+     explicite qu'il ne s'agit pas d'une probabilite d'exactitude ;
+   - profil de risque VARIANCE, NEUTRE ou REGULARITE, avec la mise en garde que
+     le tri par rang attendu défavorise structurellement les profils variance.
+
+8. TABLEAU DE TOUS LES CHEVAUX
+   Niveau stable, comparables, poids/confrontations, rythme, aptitude, forme,
+   humains, meilleur sauvetage, principale raison d'échec, confiance et
+   inconnues.
+
+9. DECOMPOSITION DE L'INCERTITUDE
+   Pour chaque cheval : part réductible, grade IRREDUCTIBLE / PEU_REDUCTIBLE /
+   PARTIELLEMENT_REDUCTIBLE / LARGEMENT_REDUCTIBLE, écart-type de rang
+   réductible et irréductible.
+   Conclus par les trois cibles de recherche prioritaires : les chevaux pour
+   lesquels un replay, un sectionnel ou un comparable changerait réellement la
+   hiérarchie. Dis explicitement sur quels chevaux chercher davantage serait du
+   temps perdu.
+
+10. RED TEAM
+    Meilleure raison factuelle de battre chacun des quatre premiers ; meilleure
+    voie vers le top 3 pour chaque cheval du tiers inférieur ; scénario inverse
+    qui bouleverse le plus la hiérarchie ; LOAO clairement identifié.
+    Si une ablation a été exécutée, cite les modules sans aucun effet.
+
+11. CONTROLES, EMPREINTES ET ENGAGEMENT
+    class_ladder.margin_coverage_mean : à 0, le canal de classe lit encore des
+    RANGS et non des marges ; dis-le au lieu de commenter des écarts mesurés.
+    n_worlds, races_per_world, n_samples, seed_policy, invariants,
+    render_purity_check, max_expected_rank_mc_stderr, sport_core_sha256,
+    sport_input_sha256, engine_sha256, rank_samples_sha256, report_sha256,
+    entry_sha256 de l'engagement et minutes restant avant le départ au moment
+    de l'émission.
+
+12. SOURCES
+    Liens directs, intitulé, nature de la preuve et heure de consultation.
+
+13. DECISION DE MISE
+    Sortie integrale de titan_stake_v1_6.py, sans reformulation ni arrondi.
+
+INTERDITS DE RENDU
+- Aucun pourcentage de victoire, top 2, top 3 ou placement par cheval.
+- Aucune cote avant SPORT-LOCK, et le manifeste de collecte doit le PROUVER.
+- Aucun engagement non publié avant le départ ne compte dans les 200.
+- Un incident de parcours élargit l'incertitude, il ne remonte jamais la note.
+- ability_class est calculé, jamais jugé, dès que form_lines existe.
+- Être distancé dans un Groupe 1 n'est pas une référence de Groupe 1.
+- Le poids d'un handicap n'est pas un critère de classement : c'est un second
+  avis sur la séparabilité du peloton.
+- Des sorties hétérogènes élargissent l'incertitude, elles ne changent pas le niveau.
+- Un cheval dont les longueurs de battue sont moins documentées que celles du
+  peloton est plus incertain, jamais moins bon.
+- Aucun effet humain sans A/E, fenêtre et dénominateur : un taux de réussite
+  mesure la qualité des chevaux confiés, pas la valeur ajoutée de l'entourage.
+- Aucun beta de valeur de clôture présenté comme un rendement, un avantage
+  exploitable ou une raison de miser : en parimutuel on encaisse la clôture.
+- Lire documentation_bias dans le rapport : si le grade est FORT ou TRÈS_FORT,
+  signaler que le classement suit peut-être le volume de dossier plutôt que
+  l'aptitude. Seul l'audit sur 30+ courses tranchera.
+- Aucune note convertie en probabilité.
+- Aucun fait sans source, aucune source décorative.
+- Aucun ordre final copié du seul scénario primaire.
+- Aucun langage de certitude sous U2 ou U3.
+- Aucun résultat post-course présenté comme une prévision.
+- Aucune revendication de performance sans engagement publié avant le départ.
+- Aucun ticket, aucune mise et aucun montant tant que le module n'a pas émis
+  TICKET. Une analyse sportive de qualité ne rend pas un pari rentable.
+
+FORMULE DE CLOTURE
+Les hiérarchies et notes sont des estimations sportives structurées. La qualité
+du protocole peut être auditée immédiatement ; sa valeur prédictive ne peut être
+revendiquée qu'après un historique pré-course publiquement engagé, comparé au
+consensus de marché et validé hors échantillon sur une période distincte.
