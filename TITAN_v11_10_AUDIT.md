@@ -1,8 +1,8 @@
-# Audit final — TITAN PLAT v11.10 / TITAN STAKE v1.6
+# Audit final — TITAN PLAT v11.10.1 / TITAN STAKE v1.6.1
 
 **Rejouable :** `python3 TITAN_v11_10_AUDIT.py` (ou `--json`).
-**Résultat :** 89 contrôles, **0 échec**.
-Self-tests : moteur **44/44**, mise **34/34**.
+**Résultat :** 103 contrôles, **0 échec**.
+Self-tests : moteur **45/45**, mise **36/36**.
 
 | Section | Contrôles |
 |---|---|
@@ -16,8 +16,10 @@ Self-tests : moteur **44/44**, mise **34/34**.
 | 7. Couche de mise et valeur de clôture | 12 |
 
 > Un audit qui ne trouve aucun défaut sur une modification substantielle est un
-> audit superficiel. Celui-ci en a trouvé **quatre**, dont **deux graves**. Ils
+> audit superficiel. Celui-ci en a trouvé **sept**, dont **quatre graves**. Ils
 > sont décrits en §1 avant les tableaux verts, parce que c'est la partie utile.
+> Trois d'entre eux (D5, D6, D7) sont dans l'instrument que j'ai moi-même écrit
+> pour dire la vérité — c'est le sous-système où un défaut coûte le plus cher.
 
 ---
 
@@ -120,6 +122,79 @@ en priorité. Verrouillé par self-test.
 Les deux corrigés. Ce contrôle est désormais automatique : il vérifie que chaque
 champ collecté, chaque commande CLI, chaque vocabulaire fermé et chaque sortie
 publiée est nommé dans le prompt.
+
+### D5 — GRAVE. Shin fausse la mesure d'un déplacement de prix
+
+*Trouvé en poursuivant un faux positif négatif jusqu'à sa cause.*
+
+`clv` dé-vigorait chaque relevé avec Shin. La correction de Shin dépend du
+**niveau de cote** et son z est ré-estimé livre par livre : elle ne s'annule
+donc pas dans une différence entre deux instants, et le résidu est corrélé à ce
+qu'on mesure.
+
+| Prélèvement | Erreur log-ratio, proportionnel | Shin |
+|---|---|---|
+| 15 % | 6,7 × 10⁻¹⁶ | **0,191** |
+| 25 % | 6,7 × 10⁻¹⁶ | **0,338** |
+| 36 % | 6,7 × 10⁻¹⁶ | **0,506** |
+
+Sur des données où le modèle ne sait **rien**, l'instrument rendait β = −0,04
+**déclaré significatif à 95 %**. Corrigé par normalisation proportionnelle, qui
+est exacte pour cet usage : en parimutuel la majoration est un scalaire uniforme
+par construction et disparaît en log-ratio centré.
+
+**L'argument reste étroit :** Shin demeure un estimateur de probabilité
+défendable et est conservé partout ailleurs. Ce qui est en cause, c'est de
+mesurer un *déplacement* avec un outil qui n'est pas un rescalage uniforme.
+
+**Question ouverte, non tranchée :** Shin est également appliqué aux rapports
+parimutuels dans `evaluate_race` et dans le diagnostic de marché du moteur. Là
+il corrige un biais comportemental réel et son emploi est défendable — mais je
+ne l'ai pas vérifié empiriquement, faute de données. À instruire.
+
+### D6 — GRAVE. L'intervalle annonçait 95 % et se trompait 11,7 % du temps
+
+*Trouvé en mesurant le taux de rejet au lieu de le supposer.*
+
+Le bootstrap par percentiles est anti-conservateur avec peu de grappes, et vingt
+journées de course, c'est peu.
+
+| Méthode | Taux de rejet réel (nominal 5 %) |
+|---|---|
+| Percentiles (v1.6.0) | **11,7 %** |
+| Student G−1 | 8,3 % |
+| **Student G−1 × √(G/(G−1))** | **3,3 %** |
+
+Le point d'estimation était juste (β moyen +0,0004 sous hypothèse nulle, 0,3
+erreur-type de zéro) : **c'était l'intervalle qui mentait, pas l'estimateur.**
+Puissance intacte après correction (15/15 sur un signal réel de 0,55). Le taux
+de rejet est désormais **mesuré à chaque audit**, pas supposé.
+
+### D7 — MOYEN. Un verdict rendu sur un estimateur biaisé
+
+Sans relevé T-10, β simple est biaisé vers le haut. La v1.6.0 publiait quand
+même un verdict assorti d'une mise en garde — un faux avantage que personne ne
+lit jusqu'au bout. Le module rend maintenant
+`NON_MESURABLE_SANS_SNAPSHOT_PRECOCE`. C'est l'idiome du reste du système :
+refuser plutôt que commenter.
+
+### Une correction tentée et REJETÉE, consignée pour qu'on ne la refasse pas
+
+J'ai voulu corriger le biais de base partagée par un **test de permutation**,
+ce qui aurait dispensé du relevé T-10. Mesuré, puis abandonné : permuter les
+vecteurs du modèle injecte l'écart entre deux vérités de course au dénominateur
+et sous-estime le nul (0,065 contre 0,313 observé sur les mêmes données nulles) ;
+permuter les désaccords ramène le nul à zéro. Les deux cassent l'appariement
+intra-course qui **crée** le biais. **Aucun test de permutation ne corrige ce
+biais** — seule une base réellement indépendante le peut.
+
+### Et un défaut dans mes propres tests
+
+Une assertion exigeait l'indécision sur trois graines fixes à 95 % — elle échoue
+une fois sur sept **par construction**. Un test statistique écrit comme un test
+déterministe est un test qui finira par être désactivé pour la mauvaise raison.
+Remplacé par la propriété stable (absence de biais) ; la mesure du taux de rejet
+est passée dans l'audit.
 
 ---
 
@@ -232,13 +307,13 @@ inactive, aucun `human_records`, aucune marge.
 3. **La marge ignore le rythme.** Cinq longueurs dans une course lente ne valent
    pas cinq longueurs dans une course rapide. Corrigeable seulement avec la
    table de par du point 1.
-4. **Le plancher de marge est contournable par la paresse uniforme.** Ne déclarer
-   *aucune* marge n'entraîne aucune pénalité, puisqu'aucun différentiel n'existe.
-   Délibéré — un plancher absolu divergerait — mais c'est une échappatoire réelle.
+4. ~~Le plancher de marge est contournable par la paresse uniforme.~~
+   **Corrigé en v11.10.1** par une inflation calculée par le moteur, que le
+   collecteur ne peut pas satisfaire en élargissant `epistemic_sd`.
 5. **L'axe `human_equipment` vaudra zéro presque partout**, faute de statistiques
    A/E françaises publiées avec dénominateur. C'est une amputation assumée, pas
    un raffinement.
-6. **Neuf cadrans non calibrés de plus.** Aucun n'a été ajusté sur données. Ils
+6. **Dix cadrans non calibrés de plus.** Aucun n'a été ajusté sur données. Ils
    sont documentés comme tels, ce qui les rend honnêtes, pas justes.
 7. **β n'est pas validé sur données réelles.** Zéro course journalisée : tout ce
    qui précède est synthétique. La simulation de puissance valide la
@@ -248,8 +323,15 @@ inactive, aucun `human_records`, aucune marge.
 8. **Aucun gain de rentabilité n'est revendiqué, ni démontrable.** Le seuil de
    comparaison est le prélèvement (≈ 15 % en simple, ≈ 36 % en trio), pas zéro.
    Rien dans cette version n'est de nature à le franchir.
-9. **Le pare-feu de collecte bloque toujours par domaine et non par page** —
-   faux positif connu et assumé depuis la v11.6, non traité.
+9. **Le pare-feu de collecte bloque par domaine pour les jetons d'opérateur.**
+   Vérifié : il tokenise l'URL entière, donc les jetons de SUJET (cotes,
+   rapports) sont déjà sensibles au chemin ; seuls les jetons d'OPÉRATEUR (pmu,
+   geny…) condamnent un domaine entier. Non corrigé **délibérément** : assouplir
+   un pare-feu de collecte contredirait le principe 2.7, et le faux positif est
+   du bon côté.
+11. **L'emploi de Shin ailleurs dans le système n'est pas vérifié.** Il est
+   défendable en principe (biais comportemental réel) mais je n'ai pas pu le
+   mesurer faute de données. Voir D5.
 10. **Je n'ai supprimé aucun module de gouvernance**, alors que la mission y
     invitait. Raisonnement en §3 de la note de version : ce sont des portes de
     refus, pas des producteurs de score. Ce qui était supprimable était un

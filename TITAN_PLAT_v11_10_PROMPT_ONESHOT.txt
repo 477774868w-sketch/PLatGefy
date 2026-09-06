@@ -690,13 +690,30 @@ quelque chose, jamais s'il RAPPORTE : pour gagner, l'information devrait en
 plus depasser le prelevement, environ 15 % sur le simple. Ne presente jamais un
 beta positif comme un rendement, un avantage exploitable ou une raison de miser.
 
-Lire beta_split_baseline EN PRIORITE quand il est disponible. L'estimateur
-simple partage le marche du snapshot entre les deux grandeurs comparees, si
-bien que le bruit de pool y fabrique un beta positif MEME QUAND LE MODELE NE
-SAIT RIEN. L'estimateur a bases separees utilise le releve T-10 comme base
-independante et en est immunise. S'ils divergent nettement, croire le second.
-C'est pour cela que les DEUX snapshots sont obligatoires : sans le releve
-T-10, la mesure reste biaisee vers le haut, c'est-a-dire flatteuse.
+SANS LE RELEVE T-10, AUCUN VERDICT N'EST RENDU. L'estimateur simple partage le
+marche du snapshot entre les deux grandeurs comparees, si bien que le bruit de
+pool y fabrique un beta positif MEME QUAND LE MODELE NE SAIT RIEN. Le module
+REFUSE donc de conclure sans base precoce independante et rend
+verdict = NON_MESURABLE_SANS_SNAPSHOT_PRECOCE. beta simple reste affiche comme
+DIAGNOSTIC : ne le cite jamais comme conclusion, et ne dis jamais que le modele
+anticipe le marche sur cette seule base.
+
+Le verdict, quand il existe, se lit sur beta_split_baseline. C'est la raison
+pour laquelle les DEUX snapshots sont obligatoires : le T-10 n'est pas un
+confort, c'est ce qui rend la mesure interpretable.
+
+Note technique, pour qu'on ne la refasse pas : un test de permutation ne repare
+PAS ce biais. Permuter les vecteurs du modele entre courses injecte l'ecart
+entre deux verites de course au denominateur et sous-estime le nul ; permuter
+les desaccords ramene le nul a zero. Les deux cassent l'appariement intra-course
+qui CREE le biais. Seule une base reellement independante le corrige.
+
+LE PROTOCOLE COMPLET GAGNE-T-IL SON COUT ? by_fill_mode donne beta separement
+pour FULL et pour LITE. Si les deux se rejoignent, l'appareil n'apporte rien
+qu'un remplissage de trois minutes n'apporte deja - et ce serait un RESULTAT,
+pas un echec. Attention : tant que les deux modes n'ont pas tourne sur les MEMES
+courses, l'ecart melange l'effet du protocole et le choix des courses ; la
+comparaison appariee, c'est `challenge`.
 
 La valeur de cloture n'ouvre AUCUNE porte : ni niveau d'echelle, ni plafond de
 mise, ni calibration. Deux compteurs volontairement distincts - la calibration
@@ -809,6 +826,10 @@ INTERDITS DE RENDU
   mesure la qualité des chevaux confiés, pas la valeur ajoutée de l'entourage.
 - Aucun beta de valeur de clôture présenté comme un rendement, un avantage
   exploitable ou une raison de miser : en parimutuel on encaisse la clôture.
+- Aucun verdict de valeur de clôture sans relevé T-10 : sans base indépendante,
+  beta est biaisé vers le haut et le module rend NON_MESURABLE.
+- Une échelle de classe sans longueurs de battue lit des RANGS : le moteur
+  élargit l'incertitude en conséquence, et cela se dit.
 - Lire documentation_bias dans le rapport : si le grade est FORT ou TRÈS_FORT,
   signaler que le classement suit peut-être le volume de dossier plutôt que
   l'aptitude. Seul l'audit sur 30+ courses tranchera.

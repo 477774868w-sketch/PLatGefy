@@ -65,7 +65,7 @@ from typing import Any, Iterable
 import numpy as np
 
 
-ENGINE_VERSION = "11.10.0"
+ENGINE_VERSION = "11.10.1"
 # Le coeur numerique est identique a celui de la v11.4. Garder cette valeur
 # preserve exactement ses tirages; ne la changer que pour une modification du
 # modele ou de la loi de simulation, jamais pour du reporting ou de la CLI.
@@ -271,6 +271,23 @@ MARGIN_WEIGHT = 0.50
 MARGIN_DEFAULT_DISTANCE_M = 1600.0
 MARGIN_EPISTEMIC_K = 0.10
 MARGIN_EPISTEMIC_MAX = 0.25
+# Inflation ABSOLUE d'incertitude quand l'echelle de classe tourne sans marges.
+#
+# Le plancher relatif ci-dessus ne mord que sur un cheval MOINS documente que
+# ses rivaux. Un collecteur qui ne declare AUCUNE marge n'a donc aucun
+# differentiel a franchir et echappe entierement a la regle: la paresse
+# selective coute, la paresse uniforme est gratuite. C'etait un trou reel,
+# consigne comme non resolu a l'audit v11.10.
+#
+# On le ferme par le mecanisme que le moteur utilise deja pour la fraicheur et
+# la volatilite de composition: un FACTEUR calcule par le moteur, applique a
+# epistemic_sd. Un collecteur ne peut pas le satisfaire en elargissant - il ne
+# peut que declarer des marges. Une echelle de classe qui lit des rangs est
+# reellement plus floue qu'une echelle qui lit des marges, et principe 2.2
+# impose que ce flou elargisse l'incertitude.
+#
+# CADRAN DECLARE, NON CALIBRE.
+MARGIN_COVERAGE_INFLATION_MAX = 1.12
 MARGIN_MAX_LENGTHS = 99.0
 DISTANCE_MIN_M = 800.0
 DISTANCE_MAX_M = 6000.0
@@ -539,6 +556,22 @@ def composition_volatility(knowledge_minutes_to_start: float, field_final: bool)
     if knowledge_minutes_to_start <= 20.0:
         return 0.10
     return min(1.0, 0.10 + (knowledge_minutes_to_start - 20.0) / 120.0)
+
+
+def margin_coverage_inflation(ladder: dict[str, Any]) -> float:
+    """Facteur d'incertitude du a une echelle de classe lue en RANGS.
+
+    Ne s'applique que si l'echelle est ACTIVE: sans historique chiffre, le canal
+    de classe ne joue pas et la marge est sans objet. Quand il joue, une
+    couverture nulle signifie qu'un 4e d'une encolure et un 4e de quinze
+    longueurs y sont encore identiques - c'est une approximation, et elle doit
+    se payer en incertitude, jamais en niveau.
+    """
+    if not ladder.get("active"):
+        return 1.0
+    coverage = float(ladder.get("margin_coverage_mean", 0.0))
+    coverage = min(1.0, max(0.0, coverage))
+    return 1.0 + (MARGIN_COVERAGE_INFLATION_MAX - 1.0) * (1.0 - coverage)
 
 
 def epistemic_inflation(knowledge_minutes_to_start: float, field_final: bool) -> float:
@@ -2074,6 +2107,11 @@ def build_arrays(raw: dict[str, Any], validated: dict[str, Any]) -> dict[str, An
         for name, value in scenario.get("factor_means", {}).items():
             factor_means[s_idx, factor_index[str(name)]] = float(value)
     inflation = float(validated["clock"]["epistemic_inflation"])
+    # v11.10.1. Une echelle de classe lue en RANGS est plus floue qu'une echelle
+    # lue en MARGES. Le facteur est calcule par le moteur, donc insensible a la
+    # facon dont le collecteur remplit epistemic_sd: c'est ce qui ferme le trou
+    # que le plancher relatif laissait ouvert a la paresse uniforme.
+    inflation *= margin_coverage_inflation(validated.get("class_ladder", {}))
     epistemic_input = np.asarray([float(r["epistemic_sd"]) for r in runners], dtype=float)
     epistemic_floor = 0.20 + 0.90 * (1.0 - confidence)
     epistemic = np.maximum(epistemic_input, epistemic_floor) * inflation
@@ -6214,6 +6252,50 @@ def self_test() -> None:
     )
     assert "MARGE_LONGUEURS" not in ablation_variants(aligned_form)
     checks["margin_channel_is_ablatable"] = True
+
+    # v11.10.1. LE TROU QUE LE PLANCHER RELATIF LAISSAIT OUVERT.
+    #
+    # Le plancher ne mord que sur un cheval MOINS documente que ses rivaux. Un
+    # collecteur qui ne declare AUCUNE marge n'a donc aucun differentiel a
+    # franchir: la paresse selective coutait, la paresse uniforme etait gratuite.
+    # Consigne comme non resolu a l'audit v11.10, ferme ici par un facteur que
+    # le MOTEUR calcule - insatisfaisable en elargissant epistemic_sd.
+    assert margin_coverage_inflation({"active": False}) == 1.0
+    assert margin_coverage_inflation(
+        {"active": True, "margin_coverage_mean": 1.0}) == 1.0
+    assert margin_coverage_inflation(
+        {"active": True, "margin_coverage_mean": 0.0}
+    ) == MARGIN_COVERAGE_INFLATION_MAX
+    # Monotone: plus la couverture est faible, plus l'incertitude est large.
+    assert (margin_coverage_inflation({"active": True, "margin_coverage_mean": 0.0})
+            > margin_coverage_inflation({"active": True, "margin_coverage_mean": 0.5})
+            > margin_coverage_inflation({"active": True, "margin_coverage_mean": 1.0}))
+    # Effet REEL sur la simulation, pas seulement une valeur publiee: le meme
+    # dossier sans marges doit produire des incertitudes plus larges qu'avec.
+    covered = json.loads(json.dumps(aligned_form))
+    for position, runner_block in enumerate(covered["runners"]):
+        runner_block["form_lines"][0]["beaten_lengths"] = 1.0 + position
+        runner_block["form_lines"][0]["distance_m"] = 1600.0
+    covered_ladder = build_class_ladder(
+        {rb["no"]: validate_form_lines(
+            rb, covered["evidence_registry"],
+            parse_iso(covered["race"]["as_of"], "as_of"), "probe")
+         for rb in covered["runners"]}, 52000.0)
+    for runner_block in covered["runners"]:
+        runner_block["score_components"]["ability_class"]["value"] = (
+            covered_ladder["ability_by_number"][runner_block["no"]])
+    bare_arrays = build_arrays(
+        aligned_form, validate_input(aligned_form, current=current,
+                                     allow_test_samples=True))
+    covered_arrays = build_arrays(
+        covered, validate_input(covered, current=current, allow_test_samples=True))
+    assert float(bare_arrays["epistemic_sd"].mean()) > float(
+        covered_arrays["epistemic_sd"].mean()), (
+        "une echelle de classe lue en rangs doit etre plus floue qu'en marges")
+    # Et le niveau, lui, ne bouge PAS a cause de la couverture: principe 2.2.
+    assert abs(float(bare_arrays["central"].mean())
+               - float(covered_arrays["central"].mean())) < 1e-9
+    checks["margin_coverage_inflates_uncertainty"] = True
 
     # --- v11.10 effets humains en A/E -----------------------------------------
     # Un taux de reussite mesure la qualite des chevaux confies; l'A/E mesure ce

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -499,8 +500,40 @@ def audit_numeric(raw: dict, report: dict, workdir: Path) -> None:
     record(section, "graine decouplee d'ENGINE_VERSION", seed_a == seed_b)
     record(section, "MODEL_VERSION inchange a 11.4.0 (aucune loi touchee)",
            ENG.MODEL_VERSION == "11.4.0", ENG.MODEL_VERSION)
-    record(section, "ENGINE_VERSION avance a 11.10.0",
-           ENG.ENGINE_VERSION == "11.10.0", ENG.ENGINE_VERSION)
+    record(section, "ENGINE_VERSION avance a 11.10.1",
+           ENG.ENGINE_VERSION == "11.10.1", ENG.ENGINE_VERSION)
+
+    # v11.10.1. Une echelle lue en RANGS doit etre plus floue qu'une echelle lue
+    # en MARGES - c'est le trou de la paresse uniforme, ferme par un facteur que
+    # le moteur calcule et qu'aucun remplissage ne peut satisfaire.
+    record(section, "inflation de couverture: neutre si l'echelle est inactive",
+           ENG.margin_coverage_inflation({"active": False}) == 1.0)
+    record(section, "inflation de couverture: nulle a couverture complete",
+           ENG.margin_coverage_inflation(
+               {"active": True, "margin_coverage_mean": 1.0}) == 1.0)
+    record(section, "inflation de couverture: maximale a couverture nulle",
+           ENG.margin_coverage_inflation(
+               {"active": True, "margin_coverage_mean": 0.0})
+           == ENG.MARGIN_COVERAGE_INFLATION_MAX,
+           f"facteur={ENG.MARGIN_COVERAGE_INFLATION_MAX}")
+    record(section, "inflation de couverture: monotone",
+           ENG.margin_coverage_inflation({"active": True, "margin_coverage_mean": 0.0})
+           > ENG.margin_coverage_inflation({"active": True, "margin_coverage_mean": 0.5})
+           > ENG.margin_coverage_inflation({"active": True, "margin_coverage_mean": 1.0}))
+    # Elle doit elargir l'INCERTITUDE sans jamais toucher au NIVEAU.
+    stripped = json.loads(json.dumps(raw))
+    for rb in stripped["runners"]:
+        for line in rb.get("form_lines") or []:
+            line.pop("beaten_lengths", None)
+            line.pop("distance_m", None)
+    ENG.reseat_declared_ability(stripped)
+    full = ENG.build_arrays(raw, ENG.validate_input(raw, allow_test_samples=True))
+    bare = ENG.build_arrays(
+        stripped, ENG.validate_input(stripped, allow_test_samples=True))
+    record(section, "sans marges: incertitude PLUS LARGE (principe 2.2)",
+           float(bare["epistemic_sd"].mean()) > float(full["epistemic_sd"].mean()),
+           f"sans={float(bare['epistemic_sd'].mean()):.4f} "
+           f"avec={float(full['epistemic_sd'].mean()):.4f}")
 
     # Retro-compatibilite numerique: sans marge, la v11.10 doit reproduire v11.9.
     record(section, "sans marge declaree, note de sortie identique a la v11.9",
@@ -597,10 +630,14 @@ def audit_stake() -> None:
                     str(nums[i]): round(float(market[i]), 6) for i in range(field)}}
             ticket["ticket_sha256"] = STK.sha256_obj(ticket)
             tickets.append(ticket); pt = ticket["ticket_sha256"]
-            if early:
-                er = {str(nums[i]): float(0.85 / max(early_p[i], 1e-6))
-                      for i in range(field)}
-                snap = STK.price_record(f"A-{race}", stamp, 10.0, er, "snapshot", pp)
+            # Le protocole impose DEUX releves, T-10 puis T-3: le plus tardif
+            # sert de base au mouvement, le plus precoce de base independante.
+            plan = ([(10.0, early_p), (3.0, market)] if early else [(3.0, market)])
+            for minutes, vector in plan:
+                snap_odds = {str(nums[i]): float(0.85 / max(vector[i], 1e-6))
+                             for i in range(field)}
+                snap = STK.price_record(
+                    f"A-{race}", stamp, minutes, snap_odds, "snapshot", pp)
                 prices.append(snap); pp = snap["record_sha256"]
             rap = {str(nums[i]): float(0.85 / max(close[i], 1e-6)) for i in range(field)}
             rec = STK.price_record(f"A-{race}", stamp, 0.0, rap, "final", pp)
@@ -612,10 +649,11 @@ def audit_stake() -> None:
     record(section, "CLV detecte un modele qui anticipe le marche",
            signal["ci95_low"] > 0, f"beta={signal['beta_market_follows_model']} "
                                    f"IC=[{signal['ci95_low']},{signal['ci95_high']}]")
-    t, p = fixture(60, 0.0, seed=99)
+    # Bruit pur AVEC base independante: le verdict doit exister et etre INDECIS.
+    t, p = fixture(60, 0.0, early=True, seed=99)
     noise = STK.closing_line_value(t, p, draws=400)
     record(section, "CLV reste indecis sur du bruit pur",
-           noise["verdict"] == "INDECIS",
+           noise["verdict"] == "INDECIS" and noise["conclusive_at_95"] is False,
            f"beta={noise['beta_market_follows_model']} verdict={noise['verdict']}")
 
     # LE BIAIS DE BASE PARTAGEE, et sa correction.
@@ -635,6 +673,87 @@ def audit_stake() -> None:
     record(section, "l'estimateur corrige conclut encore sur un VRAI signal",
            real["ci95_low"] > 0,
            f"beta corrige={real['beta_split_baseline']} (verite 0.55)")
+
+    # LE VERDICT REFUSE AU LIEU DE COMMENTER. Sans base precoce independante,
+    # beta est biaise vers le haut: le module ne doit rendre AUCUN verdict.
+    t, p = fixture(60, 0.55)
+    no_base = STK.closing_line_value(t, p, draws=300)
+    record(section, "sans releve T-10: aucun verdict rendu",
+           no_base["verdict"] == "NON_MESURABLE_SANS_SNAPSHOT_PRECOCE"
+           and no_base["conclusive_at_95"] is False
+           and no_base["beta_is_biased_upward"] is True,
+           f"verdict={no_base['verdict']} beta_brut={no_base['beta_market_follows_model']}")
+    t, p = fixture(60, 0.55, early=True, seed=31)
+    with_base = STK.closing_line_value(t, p, draws=300)
+    record(section, "avec releve T-10: le meme signal EST conclu",
+           with_base["verdict"] == "LE_MODELE_ANTICIPE_LE_MARCHE"
+           and with_base["conclusive_at_95"] is True,
+           f"verdict={with_base['verdict']}")
+    # Le faux avantage de 0,32 ne doit JAMAIS sortir en conclusion.
+    t, p = fixture(90, 0.0, pool_noise=0.30, early=True, seed=515)
+    false_edge = STK.closing_line_value(t, p, draws=300)
+    record(section, "le faux avantage n'est jamais rendu comme verdict",
+           false_edge["verdict"] == "INDECIS"
+           and false_edge["conclusive_at_95"] is False,
+           f"beta brut={false_edge['beta_market_follows_model']} "
+           f"verdict={false_edge['verdict']}")
+    # Stratification FULL vs LITE: la question du cout du protocole instrumentee.
+    record(section, "beta stratifie par mode de remplissage",
+           isinstance(false_edge.get("by_fill_mode"), dict)
+           and sum(v["n_races"] for v in false_edge["by_fill_mode"].values()) == 90,
+           str(false_edge.get("by_fill_mode")))
+
+    # CALIBRATION DE L'INTERVALLE. Un instrument qui annonce 95 % et se trompe
+    # deux fois plus souvent que promis ment. On MESURE le taux de rejet sous
+    # hypothese nulle, on ne le suppose pas.
+    rejections, trials, null_betas = 0, 30, []
+    for seed in range(6000, 6000 + trials):
+        nt, npx = fixture(60, 0.0, early=True, seed=seed)
+        result = STK.closing_line_value(nt, npx, draws=300)
+        null_betas.append(result["split_baseline_estimator"]["beta_split_baseline"])
+        if result["conclusive_at_95"]:
+            rejections += 1
+    rate = rejections / trials
+    record(section, "taux de rejet sous hypothese NULLE <= 5 % (nominal)",
+           rate <= 0.05 + 1e-9,
+           f"{rejections}/{trials} = {rate:.1%}; le bootstrap par percentiles "
+           f"donnait 11,7 % avant correction")
+    mean_null = float(np.mean(null_betas))
+    stderr_null = float(np.std(null_betas, ddof=1)) / math.sqrt(trials)
+    record(section, "estimateur corrige NON BIAISE sous hypothese nulle",
+           abs(mean_null) < 4.0 * stderr_null,
+           f"beta moyen={mean_null:+.5f} erreur-type={stderr_null:.5f}")
+    # La correction ne doit pas tuer la puissance.
+    detected = 0
+    for seed in range(7000, 7015):
+        st_, sp_ = fixture(60, 0.55, early=True, seed=seed)
+        if STK.closing_line_value(
+                st_, sp_, draws=300)["verdict"] == "LE_MODELE_ANTICIPE_LE_MARCHE":
+            detected += 1
+    record(section, "puissance conservee sur un signal reel (0,55)",
+           detected >= 14, f"{detected}/15 detections")
+
+    # SHIN N'EST PAS UN RESCALAGE UNIFORME: il ne s'annule pas dans une
+    # difference entre deux releves. La normalisation proportionnelle, si.
+    truth_book = {1: 0.40, 2: 0.25, 3: 0.18, 4: 0.11, 5: 0.06}
+    reference = STK.centred_log_ratio(
+        np.asarray([truth_book[k] for k in sorted(truth_book)], dtype=float))
+    prop_errors, shin_errors = [], []
+    for takeout in (0.15, 0.25, 0.36):
+        book = {k: (1.0 - takeout) / v for k, v in truth_book.items()}
+        prop_errors.append(float(np.abs(
+            STK.centred_log_ratio(STK.proportional_probabilities(book))
+            - reference).max()))
+        shin_map, _ = STK.shin_probabilities(book)
+        shin_errors.append(float(np.abs(
+            STK.centred_log_ratio(np.asarray(
+                [shin_map[k] for k in sorted(book)], dtype=float)) - reference).max()))
+    record(section, "de-vig proportionnel EXACT en log-ratio a tout prelevement",
+           max(prop_errors) < 1e-12,
+           f"erreur max {max(prop_errors):.1e} sur 15/25/36 %")
+    record(section, "Shin depend du niveau de cote, donc ne s'annule pas",
+           min(shin_errors) > 0.02,
+           f"ecart CLR {['%.3f' % e for e in shin_errors]} a 15/25/36 %")
 
     # LA RESERVE: la CLV n'ouvre aucune porte.
     t, p = fixture(60, 0.55)
@@ -665,7 +784,11 @@ def audit_stake() -> None:
     refuses(lambda: STK.closing_line_value(t[1:], p, draws=50),
             "journal de tickets tronque detecte", section, expect=STK.StakeError)
     # Course sans rapport final: ecartee et COMPTEE, jamais devinee.
-    partial = STK.closing_line_value(t, p[:10], draws=100)
+    # On coupe par COURSE, pas par nombre d'enregistrements: la fixture en emet
+    # plusieurs par course (snapshots + rapport final).
+    kept = {f"A-{i}" for i in range(10)}
+    partial = STK.closing_line_value(
+        t, [rec for rec in p if rec["race_key"] in kept], draws=100)
     record(section, "course sans rapport final ecartee, pas devinee",
            partial["n_races"] == 10 and partial["n_skipped"] == 10,
            f"retenues={partial['n_races']} ecartees={partial['n_skipped']}")
@@ -677,8 +800,8 @@ def audit_stake() -> None:
 
 def audit_self_tests() -> None:
     section = "0. Self-tests"
-    for path, key, expected in ((ENGINE_PATH, "engine_version", "11.10.0"),
-                                (STAKE_PATH, "stake_version", "1.6.0")):
+    for path, key, expected in ((ENGINE_PATH, "engine_version", "11.10.1"),
+                                (STAKE_PATH, "stake_version", "1.6.1")):
         proc = subprocess.run([sys.executable, str(path), "self-test"],
                               capture_output=True, text=True, timeout=3600)
         try:

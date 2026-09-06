@@ -1,7 +1,7 @@
-# TITAN PLAT v11.10 / TITAN STAKE v1.6 — note de version
+# TITAN PLAT v11.10.1 / TITAN STAKE v1.6.1 — note de version
 
-**Moteur** 11.10.0 · **Modèle** 11.4.0 (inchangé) · **Mise** 1.6.0
-Self-tests : moteur 44/44 (38 avant), mise 34/34 (28 avant), audit 89/89.
+**Moteur** 11.10.1 · **Modèle** 11.4.0 (inchangé) · **Mise** 1.6.1
+Self-tests : moteur 45/45 (38 avant), mise 36/36 (28 avant), audit 103/103.
 
 ---
 
@@ -135,11 +135,10 @@ de −0,072 (battu de 20 L).
   valent pas cinq longueurs dans une course rapide — c'est le point même de
   l'annexe sur le `finishing_speed_pct`. Une table de par piste-distance-terrain
   le corrigerait ; elle n'existe pas (voir §3).
-- **Le plancher d'incertitude relatif est contournable.** Un collecteur qui ne
-  déclare *aucune* marge n'est pas pénalisé, puisqu'il n'existe alors aucun
-  différentiel. C'est délibéré — un plancher absolu serait insatisfaisable et
-  divergerait — mais cela laisse une échappatoire : la paresse uniforme échappe
-  à la règle, la paresse sélective non.
+- **Le plancher relatif laissait passer la paresse uniforme** — corrigé en
+  v11.10.1 par une inflation calculée par le moteur (§1bis D). Le plancher
+  relatif reste néanmoins la seule mécanique satisfaisable pour le cas
+  sélectif : un plancher absolu divergerait.
 
 ### 1.3 Effets humains en A/E (moteur v11.10) — un retrait, pas un ajout
 
@@ -171,6 +170,102 @@ savait. Seul l'A/E répond à la question utile.
 
 ---
 
+## 1bis. Passe chirurgicale v11.10.1 — trois corrections, dont deux graves
+
+Cette passe n'ajoute aucune fonctionnalité. Elle corrige trois défauts trouvés
+en attaquant la v11.10, et ferme un trou que j'avais moi-même consigné comme
+non résolu.
+
+### A. GRAVE — Shin fausse la mesure d'un déplacement de prix
+
+`clv` dé-vigorait chaque relevé avec le modèle de Shin. Or **la correction de
+Shin dépend du niveau de cote et son z est ré-estimé livre par livre : elle ne
+s'annule donc pas dans une différence entre deux instants.** Le résidu est
+corrélé à ce qu'on mesure.
+
+Mesuré sur un livre construit comme le parimutuel le construit réellement
+(`rapport = (1 − prélèvement) / p`) :
+
+| Prélèvement | Erreur log-ratio, normalisation proportionnelle | Erreur, Shin |
+|---|---|---|
+| 15 % | 6,7 × 10⁻¹⁶ | **0,191** |
+| 25 % | 6,7 × 10⁻¹⁶ | **0,338** |
+| 36 % | 6,7 × 10⁻¹⁶ | **0,506** |
+
+Conséquence : sur des données où le modèle ne savait **rien**, l'instrument
+rendait β = −0,04 **déclaré significatif à 95 %** — une conclusion fausse, en
+sens inverse du biais précédent. Avec la normalisation proportionnelle : +0,002.
+
+En parimutuel la majoration est un scalaire uniforme par construction, donc
+elle disparaît exactement en log-ratio centré, à n'importe quel taux. C'est
+désormais le dé-vig utilisé dans le chemin de mesure — **et uniquement là.**
+
+**L'argument est étroit et je le garde étroit.** Shin reste un estimateur de
+probabilité défendable : il corrige un biais favori-outsider réel dans les mises
+du public. Il est conservé partout ailleurs. Ce qui est en cause, c'est de
+mesurer un *déplacement* avec un outil qui n'est pas un rescalage uniforme.
+
+### B. GRAVE — l'intervalle annonçait 95 % et se trompait 11,7 % du temps
+
+Le bootstrap par percentiles est anti-conservateur avec peu de grappes, et
+vingt journées de course, c'est peu. Mesuré sous hypothèse nulle sur 30 à 60
+jeux de 60 courses :
+
+| Méthode d'intervalle | Taux de rejet réel (nominal 5 %) |
+|---|---|
+| Percentiles (v1.6.0) | **11,7 %** |
+| Student G−1 seul | 8,3 % |
+| **Student G−1 × √(G/(G−1))** | **3,3 %** |
+
+Le point d'estimation, lui, était juste : β moyen +0,0004 sous hypothèse nulle,
+soit 0,3 erreur-type de zéro. C'était l'intervalle qui mentait, pas l'estimateur.
+Correction d'inference groupée appliquée, puissance intacte (15/15 détections
+sur un signal réel de 0,55).
+
+### C. Le verdict refuse désormais, il ne commente plus
+
+Sans relevé T-10, β simple reste biaisé vers le haut. La v11.6.0 publiait quand
+même un verdict assorti d'une mise en garde — c'est-à-dire un faux avantage que
+personne ne lit jusqu'au bout. Le module rend maintenant
+`NON_MESURABLE_SANS_SNAPSHOT_PRECOCE` et β simple redevient un diagnostic.
+C'est l'idiome du reste du système : refuser plutôt que commenter.
+
+### D. Le trou de la paresse uniforme, fermé
+
+Le plancher d'incertitude relatif ne mordait que sur un cheval **moins**
+documenté que ses rivaux : ne déclarer **aucune** marge ne coûtait rien. Fermé
+par un facteur que le **moteur** calcule (`MARGIN_COVERAGE_INFLATION_MAX`,
+cadran déclaré non calibré), sur le mécanisme déjà utilisé pour la fraîcheur et
+la volatilité de composition. Un collecteur ne peut plus le satisfaire en
+élargissant `epistemic_sd` : il ne peut que déclarer des marges. Mesuré : 0,551
+sans marges contre 0,492 avec, à niveau strictement inchangé.
+
+**Conséquence de compatibilité :** un dossier v11.9 portant `form_lines` sans
+marges produit désormais une incertitude 12 % plus large. Le niveau ne bouge
+pas ; `outing_rating` reste identique au chiffre près.
+
+### E. Une innovation testée et REJETÉE — le test de permutation
+
+J'ai voulu corriger le biais de base partagée par un test de permutation, ce qui
+aurait évité d'exiger le relevé T-10. **Mesuré, puis abandonné :** permuter les
+vecteurs du modèle entre courses injecte l'écart entre deux vérités de course au
+dénominateur et sous-estime le nul (0,065 contre un β observé de 0,313 sur les
+mêmes données nulles) ; permuter les désaccords ramène le nul à zéro. Les deux
+cassent l'appariement intra-course qui **crée** le biais.
+
+**Aucun test de permutation ne peut corriger ce biais.** Seule une base
+réellement indépendante le peut. C'est consigné dans le code et dans le prompt
+pour qu'on ne refasse pas la tentative.
+
+### F. Un test de moi-même qui était bancal
+
+J'avais écrit une assertion exigeant l'indécision sur trois graines fixes à
+95 % — qui échoue une fois sur sept **par construction**. Remplacée par le test
+de la propriété stable (l'absence de biais), la mesure du taux de rejet étant
+déplacée dans l'audit, qui peut se permettre les réplications.
+
+---
+
 ## 2. Traçabilité : ce que j'ai touché aux principes de la section 2
 
 Comme la mission l'exige, chaque écart est écrit noir sur blanc. **Aucun
@@ -181,13 +276,14 @@ exact ouvert par `ability_class` en v11.8. Conséquence assumée : **un dossier
 v11.9 qui portait un `human_equipment` non nul par jugement est désormais
 refusé.** C'est une rupture de compatibilité délibérée.
 
-**2.6 — neuf cadrans non calibrés ajoutés**, tous documentés comme tels dans le
+**2.6 — dix cadrans non calibrés ajoutés**, tous documentés comme tels dans le
 code, au même titre que `CLASS_PERFORMANCE_BETA` :
 `MARGIN_LENGTH_METRES` (2,4 m — le seul non arbitraire, c'est de la géométrie),
 `MARGIN_REFERENCE_SPREAD` (0,025), `MARGIN_WEIGHT` (0,50),
 `MARGIN_DEFAULT_DISTANCE_M` (1600), `MARGIN_EPISTEMIC_K` (0,10),
 `MARGIN_EPISTEMIC_MAX` (0,25), `HUMAN_AE_SHRINK_PRIOR` (200),
-`HUMAN_AE_BETA` (0,55), `HUMAN_AE_MIN_RUNNERS` (30).
+`HUMAN_AE_BETA` (0,55), `HUMAN_AE_MIN_RUNNERS` (30),
+`MARGIN_COVERAGE_INFLATION_MAX` (1,12).
 
 **⚠ Un écart réel, à lire attentivement.** `apply_scratch` **écrit désormais
 dans un champ déclaré** (`epistemic_sd`). Jusqu'ici le moteur ne réécrivait que

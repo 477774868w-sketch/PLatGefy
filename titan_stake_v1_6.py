@@ -61,7 +61,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import numpy as np
 
 
-STAKE_VERSION = "1.6.0"
+STAKE_VERSION = "1.6.1"
 CALIBRATION_SCHEMA = "titan-stake-calibration-1.4"
 PRICE_LOG_SCHEMA = "titan-stake-pricelog-1.4"
 DRIFT_SCHEMA = "titan-stake-drift-1.1"
@@ -1076,6 +1076,11 @@ def evaluate_race(
         "context": {
             "race_key": report["race_key"],
             "course_name": report["course_name"],
+            # v1.6.1. Reporte pour que la valeur de cloture puisse comparer le
+            # protocole COMPLET au remplissage LEGER: si les deux portent la
+            # meme information, l'appareil ne gagne pas son cout.
+            "fill_mode": report.get("fill_mode", "FULL"),
+            "data_grade": report.get("data_grade"),
             "report_sha256": report["report_sha256"],
             "rank_samples_sha256": report["rank_samples_sha256"],
             "entry_sha256": commit.get("entry_sha256") if commit else None,
@@ -1759,6 +1764,88 @@ def fit_drift_model(records: list[dict[str, Any]], min_observations: int = 200) 
 # 9. TEMPLATES
 # ---------------------------------------------------------------------------
 
+def proportional_probabilities(
+    odds: dict[int, float], order: list[int] | None = None
+) -> np.ndarray:
+    """De-vigorisation PROPORTIONNELLE, la seule correcte en parimutuel.
+
+    L'ARGUMENT EST ETROIT, ET IL FAUT LE GARDER ETROIT.
+
+    On ne pretend PAS que Shin est un mauvais estimateur de probabilite. Shin
+    attribue la majoration a des parieurs informes et corrige le biais
+    favori-outsider - biais reel et documente dans les mises du public. Pour
+    ESTIMER une probabilite de victoire, il reste defendable, et c'est pour
+    cela qu'il est conserve partout ailleurs dans ce module.
+
+    Ce qui est en cause ici, c'est de mesurer un DEPLACEMENT entre deux releves.
+    La correction de Shin n'est pas un rescalage uniforme: elle depend du niveau
+    de cote, et son z est reestime livre par livre. Elle ne s'annule donc PAS
+    dans une difference entre deux instants, et ce qui reste est un residu
+    correle au niveau de cote - c'est-a-dire correle a ce qu'on mesure.
+
+    La normalisation proportionnelle, elle, est exacte pour cet usage. En
+    parimutuel rapport_i = pool x (1 - prelevement) / mise_i, donc la
+    majoration est un SCALAIRE UNIFORME et elle disparait EXACTEMENT en
+    coordonnees log-ratio centrees, a n'importe quel taux: mesure a 1e-16 pour
+    15 %, 25 % et 36 %. Les parts de mises sont conservees telles quelles, et
+    c'est precisement ce qu'un deplacement de marche doit comparer.
+
+    Consequence mesuree du melange des deux: sur des donnees ou le modele ne
+    sait RIEN, la version Shin rendait beta = -0,04 declare significatif a 95 %
+    - une conclusion fausse, en sens inverse du biais precedent. La version
+    proportionnelle rend +0,002 sur les memes donnees.
+    """
+    keys = list(order) if order is not None else sorted(odds)
+    values = np.asarray([1.0 / float(odds[key]) for key in keys], dtype=float)
+    total = float(values.sum())
+    if total <= 0.0:
+        raise StakeError("Livre de cotes degenere: somme des inverses nulle")
+    return values / total
+
+
+# Valeurs critiques de Student a 97,5 %, par degres de liberte. Table figee
+# plutot qu'une dependance a scipy: ce module ne doit rien importer d'autre que
+# numpy pour rester executable partout.
+_T_CRIT_975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+               7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 12: 2.179, 14: 2.145,
+               16: 2.120, 19: 2.093, 24: 2.064, 29: 2.045, 39: 2.023,
+               49: 2.010, 59: 2.001, 99: 1.984, 199: 1.972}
+
+
+def student_critical(dof: int) -> float:
+    if dof < 1:
+        return 12.706
+    for key in sorted(_T_CRIT_975):
+        if dof <= key:
+            return _T_CRIT_975[key]
+    return 1.96
+
+
+def cluster_interval(
+    point: float, samples: np.ndarray, n_clusters: int
+) -> tuple[float, float]:
+    """Intervalle a 95 % corrige pour un NOMBRE DE GRAPPES faible.
+
+    Le bootstrap par percentiles est anti-conservateur quand les grappes sont
+    peu nombreuses - et vingt journees de course, c'est peu. Mesure sous
+    hypothese nulle sur 60 jeux de 60 courses: le taux de rejet reel etait de
+    11,7 % pour un nominal de 5 %. Un instrument qui annonce 95 % et se trompe
+    deux fois plus souvent que promis est un instrument qui ment.
+
+    On applique donc la correction standard d'inference groupee: valeur
+    critique de Student a G-1 degres de liberte, et facteur de petit
+    echantillon racine(G/(G-1)). Meme mesure apres correction: 3,3 %. On erre
+    du cote CONSERVATEUR, ce qui est le bon cote pour ce projet.
+    """
+    spread = float(samples.std(ddof=1)) if samples.size > 1 else 0.0
+    if n_clusters <= 1:
+        return (float("-inf"), float("inf"))
+    factor = student_critical(n_clusters - 1) * math.sqrt(
+        n_clusters / (n_clusters - 1))
+    half = factor * spread
+    return point - half, point + half
+
+
 def centred_log_ratio(probabilities: np.ndarray) -> np.ndarray:
     """Coordonnees CLR: log(p) recentre sur la course.
 
@@ -1822,7 +1909,7 @@ def closing_line_value(
     verify_ticket_journal(tickets)
     verify_price_journal(price_log)
     finals: dict[str, dict[str, float]] = {}
-    earliest: dict[str, dict[str, Any]] = {}
+    snapshots: dict[str, list[dict[str, Any]]] = {}
     for record in price_log:
         key = str(record["race_key"])
         if record.get("kind") == "final":
@@ -1830,13 +1917,7 @@ def closing_line_value(
                 raise StakeError(f"Deux rapports finaux pour la meme course: {key}")
             finals[key] = {str(k): float(v) for k, v in record["rapports"].items()}
         elif record.get("kind") == "snapshot":
-            # Le snapshot le PLUS PRECOCE de la course; il sert de base
-            # independante a l'estimateur a bases separees, plus bas.
-            previous = earliest.get(key)
-            if previous is None or float(record["minutes_to_post"]) > float(
-                previous["minutes_to_post"]
-            ):
-                earliest[key] = record
+            snapshots.setdefault(key, []).append(record)
 
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1875,49 +1956,63 @@ def closing_line_value(
         if any(value <= 1.0 for value in odds.values()):
             skipped.append({"race_key": key, "reason": "rapport final <= 1"})
             continue
-        closing_map, shin_z = shin_probabilities(odds)
+        order = [int(n) for n in common]
+        p_close = proportional_probabilities(odds, order)
         p_model = np.asarray([float(model_raw[n]) for n in common], dtype=float)
-        p_market = np.asarray([float(market_raw[n]) for n in common], dtype=float)
-        p_close = np.asarray([closing_map[int(n)] for n in common], dtype=float)
-        if p_model.sum() <= 0 or p_market.sum() <= 0:
-            skipped.append({"race_key": key, "reason": "vecteur de probabilites degenere"})
+        if p_model.sum() <= 0:
+            skipped.append({"race_key": key, "reason": "vecteur modele degenere"})
             continue
         p_model = p_model / p_model.sum()
-        p_market = p_market / p_market.sum()
+
+        # BASE DE MARCHE. On la prend au JOURNAL DE PRIX quand il la porte, pour
+        # que les trois vecteurs comparés soient dans le meme systeme de
+        # coordonnees. Le vecteur du ticket est de-vigore par Shin, la cloture
+        # ici par normalisation proportionnelle: les melanger reintroduirait
+        # exactement la distorsion que ce bloc existe pour eviter.
+        race_snaps = snapshots.get(key, [])
+        usable = [
+            snap for snap in race_snaps
+            if set(common) <= set(map(str, snap["rapports"]))
+            and all(float(snap["rapports"][str(n)]) > 1.0 for n in common)
+        ]
+        # Du plus loin du depart au plus proche.
+        usable.sort(key=lambda snap: -float(snap["minutes_to_post"]))
+        if usable:
+            baseline_source = "journal_de_prix"
+            p_market = proportional_probabilities(
+                {int(n): float(usable[-1]["rapports"][str(n)]) for n in common}, order)
+        else:
+            baseline_source = "ticket_shin"
+            p_market = np.asarray([float(market_raw[n]) for n in common], dtype=float)
+            if p_market.sum() <= 0:
+                skipped.append({"race_key": key, "reason": "vecteur marche degenere"})
+                continue
+            p_market = p_market / p_market.sum()
         disagreement = centred_log_ratio(p_model) - centred_log_ratio(p_market)
         movement = centred_log_ratio(p_close) - centred_log_ratio(p_market)
-        # BASE PRECOCE INDEPENDANTE - correction d'un biais que l'estimateur
-        # simple porte structurellement. Voir la note sur beta_split plus bas:
-        # d et m partagent p_marche, donc TOUT bruit de pool dans ce vecteur
-        # entre avec le meme signe dans les deux et fabrique de la covariance
-        # meme quand le modele ne sait rien. Un snapshot anterieur - le releve
-        # T-10 que le protocole impose deja - fournit une base dont le bruit est
-        # independant de celui du snapshot principal.
-        early = earliest.get(key)
+
+        # BASE PRECOCE INDEPENDANTE - correction du biais structurel de
+        # l'estimateur simple: d et m partagent p_marche, donc tout bruit de
+        # pool dans ce vecteur entre avec le meme signe dans les deux et
+        # fabrique de la covariance meme quand le modele ne sait rien. Un
+        # releve ANTERIEUR - le T-10 que le protocole impose deja - fournit une
+        # base dont le bruit est independant de celui du snapshot principal.
         disagreement_early = None
-        if early is not None and float(early["minutes_to_post"]) > float(
-            context.get("minutes_to_post_at_snapshot") or 0.0
-        ):
-            early_rapports = {str(k): float(v) for k, v in early["rapports"].items()}
-            if set(common) <= set(early_rapports):
-                early_odds = {int(n): early_rapports[n] for n in common}
-                if all(value > 1.0 for value in early_odds.values()):
-                    early_map, _ = shin_probabilities(early_odds)
-                    p_early = np.asarray(
-                        [early_map[int(n)] for n in common], dtype=float
-                    )
-                    disagreement_early = (
-                        centred_log_ratio(p_model) - centred_log_ratio(p_early)
-                    )
+        if len(usable) >= 2:
+            p_early = proportional_probabilities(
+                {int(n): float(usable[0]["rapports"][str(n)]) for n in common}, order)
+            disagreement_early = (
+                centred_log_ratio(p_model) - centred_log_ratio(p_early))
         observed_at = str(context.get("evaluated_at_utc") or "")
         rows.append({
             "race_key": key,
+            "fill_mode": str(context.get("fill_mode") or "INCONNU"),
             "day": observed_at[:10] or key[:10],
             "n_runners": len(common),
             "n_scratched_after_snapshot": len(set(market_raw) - set(final)),
             "published_before_start": published,
             "minutes_to_post": context.get("minutes_to_post_at_snapshot"),
-            "shin_z_closing": round(shin_z, 5),
+            "market_baseline_source": baseline_source,
             "d": disagreement,
             "m": movement,
             "d_early": disagreement_early,
@@ -1968,8 +2063,7 @@ def closing_line_value(
         m = np.concatenate([rows[i]["m"] for i in picked])
         bottom = float(d @ d)
         samples[draw] = float(d @ m) / bottom if bottom > 1e-12 else 0.0
-    ci_low = float(np.quantile(samples, 0.025))
-    ci_high = float(np.quantile(samples, 0.975))
+    ci_low, ci_high = cluster_interval(beta, samples, len(keys))
     standard_error = float(samples.std(ddof=1))
 
     # PROJECTION DE PUISSANCE. A effet constant, combien de courses encore avant
@@ -2032,16 +2126,20 @@ def closing_line_value(
                 mm = np.concatenate([split_rows[i]["m"] for i in picked])
                 den = float(e @ l)
                 split_samples[draw] = float(e @ mm) / den if abs(den) > 1e-12 else 0.0
+            split_low, split_high = cluster_interval(
+                beta_split, split_samples, len(split_keys))
             split = {
                 "available": True,
                 "n_races": len(split_rows),
+                "n_day_clusters": len(split_keys),
                 "beta_split_baseline": round(beta_split, 5),
-                "ci95_low": round(float(np.quantile(split_samples, 0.025)), 5),
-                "ci95_high": round(float(np.quantile(split_samples, 0.975)), 5),
-                "conclusive_at_95": bool(
-                    float(np.quantile(split_samples, 0.025)) > 0.0
-                    or float(np.quantile(split_samples, 0.975)) < 0.0
+                "ci95_low": round(split_low, 5),
+                "ci95_high": round(split_high, 5),
+                "interval_method": (
+                    "bootstrap par journee, corrige petit nombre de grappes "
+                    "(Student G-1 et facteur racine(G/(G-1)))"
                 ),
+                "conclusive_at_95": bool(split_low > 0.0 or split_high < 0.0),
                 "reading": (
                     "estimateur non biaise par le bruit de pool du snapshot. C'est "
                     "CELUI-CI qu'il faut croire quand les deux divergent: un "
@@ -2050,13 +2148,63 @@ def closing_line_value(
                 ),
             }
 
+    # LE PROTOCOLE COMPLET GAGNE-T-IL SON COUT ? (v1.6.1)
+    #
+    # Question centrale de ce projet, restee sans instrument: six versions ont
+    # empile de la machinerie sans qu'on puisse dire si elle apporte quoi que ce
+    # soit qu'un remplissage de trois minutes n'apporterait pas. On stratifie
+    # donc beta par mode de remplissage. Si LITE et FULL portent le meme beta,
+    # l'appareil ne gagne pas son cout - et c'est un resultat, pas un echec.
+    #
+    # CONFONDANT MAJEUR, et il interdit toute conclusion hative: les courses
+    # traitees en FULL ne sont pas les memes que celles traitees en LITE. Tant
+    # que les DEUX modes n'ont pas tourne sur les MEMES courses, l'ecart mesure
+    # ici melange l'effet du protocole et le choix des courses. La commande
+    # `challenge` du moteur existe pour cette comparaison appariee.
+    by_fill: dict[str, Any] = {}
+    for mode in sorted({row["fill_mode"] for row in rows}):
+        subset = [row for row in rows if row["fill_mode"] == mode]
+        sub_d = np.concatenate([row["d"] for row in subset])
+        sub_m = np.concatenate([row["m"] for row in subset])
+        bottom = float(sub_d @ sub_d)
+        by_fill[mode] = {
+            "n_races": len(subset),
+            "beta": round(float(sub_d @ sub_m) / bottom, 5) if bottom > 1e-12 else None,
+            "n_with_independent_baseline": sum(
+                1 for row in subset if row["d_early"] is not None),
+        }
+
     # Lecture legible: parmi les chevaux que le modele aime le PLUS par rapport
     # au marche, de combien le prix a-t-il bouge en leur faveur ?
     order = np.argsort(all_d)
     quintile = max(1, len(order) // 5)
     liked = order[-quintile:]
     disliked = order[:quintile]
-    conclusive = ci_low > 0.0 or ci_high < 0.0
+    # LE VERDICT REFUSE, IL NE COMMENTE PAS (v1.6.1).
+    #
+    # beta simple est structurellement BIAISE VERS LE HAUT par le bruit de pool
+    # partage entre d et m. Publier malgre tout un verdict assorti d'une mise en
+    # garde, c'est publier un faux avantage que personne ne lira jusqu'au bout:
+    # c'est precisement le mode d'echec que le reste du systeme evite en
+    # REFUSANT le scellement plutot qu'en le commentant. On aligne donc la
+    # mesure sur la meme regle.
+    #
+    # Sans base precoce independante, aucun verdict n'est rendu. beta simple
+    # reste publie comme DIAGNOSTIC, jamais comme conclusion.
+    #
+    # Note negative, verifiee et consignee: un test de permutation ne repare PAS
+    # ce biais. Permuter les vecteurs du modele entre courses injecte l'ecart
+    # entre deux verites de course au denominateur et sous-estime le nul;
+    # permuter les desaccords ramene le nul a zero. Dans les deux cas la
+    # permutation casse l'appariement intra-course qui CREE le biais. Seule une
+    # base reellement independante - le releve T-10 - le corrige.
+    measurable = bool(split.get("available"))
+    if measurable:
+        verdict_low = float(split["ci95_low"])
+        verdict_high = float(split["ci95_high"])
+    else:
+        verdict_low = verdict_high = 0.0
+    conclusive = measurable and (verdict_low > 0.0 or verdict_high < 0.0)
     return {
         "schema_version": CLV_SCHEMA,
         "stake_version": STAKE_VERSION,
@@ -2078,13 +2226,33 @@ def closing_line_value(
         "bootstrap_unit": "journee_de_course",
         "bootstrap_draws": draws,
         "conclusive_at_95": bool(conclusive),
+        # Le verdict se lit sur l'estimateur NON BIAISE, jamais sur beta simple.
         "verdict": (
-            "LE_MODELE_ANTICIPE_LE_MARCHE" if ci_low > 0.0 else
-            "LE_MARCHE_CONTREDIT_LE_MODELE" if ci_high < 0.0 else
+            "NON_MESURABLE_SANS_SNAPSHOT_PRECOCE" if not measurable else
+            "LE_MODELE_ANTICIPE_LE_MARCHE" if verdict_low > 0.0 else
+            "LE_MARCHE_CONTREDIT_LE_MODELE" if verdict_high < 0.0 else
             "INDECIS"
         ),
+        "verdict_basis": (
+            "estimateur a bases separees (non biaise)" if measurable else
+            "aucun: sans releve de prix anterieur au snapshot d'evaluation, beta "
+            "est biaise vers le haut et AUCUN verdict n'est rendu. Relever T-10 "
+            "puis T-3, comme le protocole l'impose deja. beta simple ci-dessous "
+            "est un diagnostic, pas une conclusion."
+        ),
+        "beta_is_biased_upward": not measurable,
         "races_needed_for_verdict_at_current_effect": races_needed,
         "split_baseline_estimator": split,
+        "by_fill_mode": by_fill,
+        "by_fill_mode_reading": (
+            "beta par mode de remplissage. Un beta LITE comparable au beta FULL "
+            "signifierait que le protocole complet n'apporte pas d'information "
+            "que trois minutes de lecture n'apportent pas - ce serait un "
+            "resultat exploitable, pas un echec. ATTENTION: tant que les deux "
+            "modes n'ont pas tourne sur les MEMES courses, l'ecart melange "
+            "l'effet du protocole et la selection des courses; utiliser "
+            "`challenge` pour une comparaison appariee."
+        ),
         "mean_move_on_most_liked": round(float(all_m[liked].mean()), 5),
         "mean_move_on_least_liked": round(float(all_m[disliked].mean()), 5),
         "legible_reading": (
@@ -2793,12 +2961,17 @@ def self_test() -> None:
             ticket["ticket_sha256"] = sha256_obj(ticket)
             tickets_out.append(ticket)
             previous_ticket = ticket["ticket_sha256"]
-            if with_early_snapshot:
-                early_rapports = {
-                    str(numbers[i]): float(0.85 / max(early[i], 1e-6)) for i in keep
+            # Le protocole impose DEUX releves, T-10 puis T-3. Le plus tardif
+            # sert de base au mouvement, le plus precoce de base independante.
+            snapshot_plan = ([(10.0, early), (3.0, market)] if with_early_snapshot
+                             else [(3.0, market)])
+            for snap_minutes, snap_vector in snapshot_plan:
+                snap_rapports = {
+                    str(numbers[i]): float(0.85 / max(snap_vector[i], 1e-6))
+                    for i in keep
                 }
                 snap = price_record(
-                    f"CLV-{race}", stamp, 10.0, early_rapports, "snapshot",
+                    f"CLV-{race}", stamp, snap_minutes, snap_rapports, "snapshot",
                     previous_price,
                 )
                 prices_out.append(snap)
@@ -2817,8 +2990,17 @@ def self_test() -> None:
     # Le marche adopte 55 % du desaccord: beta doit s'en approcher.
     assert 0.35 < followed["beta_market_follows_model"] < 0.75, followed
     assert followed["ci95_low"] > 0.0
-    assert followed["verdict"] == "LE_MODELE_ANTICIPE_LE_MARCHE"
-    assert followed["conclusive_at_95"] is True
+    # SANS releve precoce, aucun verdict n'est rendu: beta simple est biaise
+    # vers le haut et le module REFUSE de conclure au lieu de commenter.
+    assert followed["verdict"] == "NON_MESURABLE_SANS_SNAPSHOT_PRECOCE"
+    assert followed["conclusive_at_95"] is False
+    assert followed["beta_is_biased_upward"] is True
+    # AVEC releve precoce, le meme signal doit etre conclu.
+    early_t, early_p = clv_fixture(60, follow=0.55, with_early_snapshot=True, seed=31)
+    early = closing_line_value(early_t, early_p, draws=400)
+    assert early["verdict"] == "LE_MODELE_ANTICIPE_LE_MARCHE", early["verdict"]
+    assert early["conclusive_at_95"] is True
+    assert early["beta_is_biased_upward"] is False
     # Lecture legible: les chevaux preferes doivent raccourcir plus que les autres.
     assert followed["mean_move_on_most_liked"] > followed["mean_move_on_least_liked"]
     checks["clv_detects_anticipated_move"] = True
@@ -2828,7 +3010,6 @@ def self_test() -> None:
     noise_tickets, noise_prices = clv_fixture(60, follow=0.0, seed=99)
     noisy = closing_line_value(noise_tickets, noise_prices, draws=400)
     assert noisy["ci95_low"] <= 0.0 <= noisy["ci95_high"], noisy
-    assert noisy["verdict"] == "INDECIS"
     assert noisy["conclusive_at_95"] is False
     # La projection de puissance doit demander PLUS de courses qu'on n'en a.
     assert (noisy["races_needed_for_verdict_at_current_effect"] is None
@@ -2874,8 +3055,16 @@ def self_test() -> None:
     else:
         raise AssertionError("Un journal de prix altere aurait du faire echouer la CLV")
     # Une course sans rapport final est ECARTEE et comptee, jamais devinee.
-    partial = closing_line_value(followed_tickets, followed_prices[:40], draws=100)
-    assert partial["n_races"] == 40 and partial["n_skipped"] == 20
+    # On coupe le journal de prix aux 20 premieres courses. La fixture emet un
+    # snapshot T-3 puis un rapport final par course, donc deux enregistrements.
+    kept_races = {f"CLV-{i}" for i in range(20)}
+    partial = closing_line_value(
+        followed_tickets,
+        [rec for rec in followed_prices if rec["race_key"] in kept_races],
+        draws=100,
+    )
+    assert partial["n_races"] == 20 and partial["n_skipped"] == 40, (
+        partial["n_races"], partial["n_skipped"])
     # Aucun couple exploitable: sortie honnete, pas un beta invente.
     empty = closing_line_value(followed_tickets, [], draws=50)
     assert empty["fitted"] is False and empty["n_races"] == 0
@@ -2906,6 +3095,14 @@ def self_test() -> None:
     ), corrected
     assert corrected["ci95_low"] <= 0.0 <= corrected["ci95_high"], corrected
     assert corrected["conclusive_at_95"] is False
+    # Et surtout: le VERDICT publie suit l'estimateur corrige, pas beta simple.
+    # Un faux avantage de 0,32 ne doit jamais sortir en conclusion.
+    assert biased["verdict"] == "INDECIS", biased["verdict"]
+    assert biased["conclusive_at_95"] is False
+    # Stratification par mode de remplissage: la question "l'appareil gagne-t-il
+    # son cout" doit etre instrumentee, meme si elle reste sans reponse ici.
+    assert set(biased["by_fill_mode"]) == {"INCONNU"}
+    assert biased["by_fill_mode"]["INCONNU"]["n_races"] == 90
     # Et sur un VRAI signal, l'estimateur corrige doit continuer a conclure.
     real_tickets, real_prices = clv_fixture(
         90, follow=0.55, pool_noise=0.30, with_early_snapshot=True, seed=707,
@@ -2918,6 +3115,69 @@ def self_test() -> None:
     # au lieu de laisser croire que beta simple suffit.
     assert followed["split_baseline_estimator"]["available"] is False
     checks["clv_split_baseline_removes_shared_noise_bias"] = True
+
+    # DEFAUT TROUVE EN AUDIT v1.6.1 : UN DEPLACEMENT NE SE MESURE PAS AVEC SHIN.
+    #
+    # Shin reste un estimateur de probabilite defendable - il corrige un biais
+    # favori-outsider reel - et il est conserve partout ailleurs. Mais sa
+    # correction depend du NIVEAU de cote et son z est reestime livre par livre:
+    # elle ne s'annule donc pas dans une difference entre deux instants. Le
+    # residu est correle a ce qu'on mesure, et il fabriquait un beta NEGATIF
+    # declare significatif sur des donnees ou le modele ne sait rien.
+    # On construit le livre comme le parimutuel le construit REELLEMENT:
+    # rapport_i = (1 - prelevement) / p_i, donc booksum = 1/(1 - prelevement).
+    truth = {1: 0.40, 2: 0.25, 3: 0.18, 4: 0.11, 5: 0.06}
+    books = {t: {k: (1.0 - t) / v for k, v in truth.items()}
+             for t in (0.15, 0.25, 0.36)}
+    reference = centred_log_ratio(
+        np.asarray([truth[k] for k in sorted(truth)], dtype=float))
+    for takeout, book in books.items():
+        # La majoration uniforme DISPARAIT exactement en log-ratio centre,
+        # quel que soit le taux: 15 % comme 36 %.
+        assert float(np.abs(
+            centred_log_ratio(proportional_probabilities(book)) - reference
+        ).max()) < 1e-12, takeout
+        # Shin, lui, ne conserve PAS ces coordonnees. C'est la distorsion qui,
+        # appliquee a deux releves d'instants differents, ne s'annulait pas.
+        shin_map, shin_z = shin_probabilities(book)
+        shin_vector = np.asarray(
+            [shin_map[k] for k in sorted(book)], dtype=float)
+        assert shin_z > 0.0, takeout
+        assert float(np.abs(
+            centred_log_ratio(shin_vector) - reference).max()) > 0.02, takeout
+    # Consequence de bout en bout: sur du BRUIT PUR, l'estimateur doit etre
+    # CENTRE SUR ZERO. On teste l'absence de biais - propriete stable - et non
+    # le verdict d'une graine particuliere: a 95 %, exiger l'indecision sur
+    # trois graines fixes echouerait une fois sur sept par construction. Le
+    # taux de rejet reel est mesure dans l'audit, qui peut se le permettre.
+    null_betas = []
+    for seed in range(40, 52):
+        null_t, null_p = clv_fixture(
+            60, follow=0.0, with_early_snapshot=True, seed=seed)
+        null_betas.append(closing_line_value(
+            null_t, null_p, draws=200)["split_baseline_estimator"]
+            ["beta_split_baseline"])
+    spread = float(np.std(null_betas, ddof=1)) / math.sqrt(len(null_betas))
+    assert abs(float(np.mean(null_betas))) < 4.0 * spread, (
+        "l'estimateur a bases separees doit etre centre sur zero sous "
+        f"hypothese nulle: moyenne {np.mean(null_betas):+.5f}")
+    checks["clv_parimutuel_devig_is_proportional"] = True
+
+    # L'INTERVALLE DOIT ETRE HONNETE, PAS SEULEMENT LE POINT.
+    # Mesure sous hypothese nulle: le bootstrap par percentiles rejetait 11,7 %
+    # du temps pour un nominal de 5 %, avec une vingtaine de journees. La
+    # correction d'inference groupee ramene la mesure a 3,3 %.
+    draw_sample = np.random.default_rng(7).normal(0.0, 0.02, 2000)
+    for clusters in (5, 10, 20, 40):
+        low, high = cluster_interval(0.0, draw_sample, clusters)
+        percentile_half = 1.96 * float(draw_sample.std(ddof=1))
+        assert (high - low) / 2.0 > percentile_half, clusters
+    # Moins il y a de grappes, plus l'intervalle doit etre large.
+    widths = [cluster_interval(0.0, draw_sample, g)[1] for g in (5, 10, 20, 40)]
+    assert widths[0] > widths[1] > widths[2] > widths[3]
+    # Une seule grappe ne permet AUCUNE inference.
+    assert cluster_interval(0.0, draw_sample, 1) == (float("-inf"), float("inf"))
+    checks["clv_interval_corrected_for_few_clusters"] = True
 
     print(json.dumps(
         {
