@@ -3545,6 +3545,15 @@ def ablation_variants(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 # le seul qu'on ne saurait pas mesurer.
                 if axis == "ability_class":
                     runner.pop("form_lines", None)
+                # v11.10, meme piege, meme correctif. human_equipment est
+                # desormais CALCULE depuis human_records: laisser les
+                # enregistrements A/E en place ferait echouer la variante sur la
+                # clause anti-ecrasement, et l'axe deviendrait le seul qu'on ne
+                # saurait pas mesurer. C'est exactement le defaut que la v11.8
+                # avait introduit pour ability_class. Un module qu'on ne sait pas
+                # ablater est un module qu'on croit sur parole.
+                if axis == "human_equipment":
+                    runner.pop("human_records", None)
         variants[f"AXE_{axis}"] = variant
     for channel in ADJUSTMENT_CAPS:
         variant = json.loads(json.dumps(raw))
@@ -6246,6 +6255,16 @@ def self_test() -> None:
     }
     validated_human = validate_input(human_ok, current=current, allow_test_samples=True)
     assert validated_human["human_records"][1]["value"] == computed_human["value"]
+
+    # DEFAUT TROUVE EN AUDIT v11.10, identique a celui de la v11.8 sur
+    # ability_class: neutraliser l'axe sans retirer ses ENTREES fait echouer la
+    # variante sur la clause anti-ecrasement, et l'axe le plus recent devient le
+    # seul dont on ne peut pas mesurer l'influence.
+    human_variants = ablation_variants(human_ok)
+    neutralised = human_variants["AXE_human_equipment"]
+    assert all(not runner.get("human_records")
+               for runner in neutralised["runners"] if runner.get("active"))
+    validate_input(neutralised, current=current, allow_test_samples=True)
 
     # Un A/E sous 1 doit COUTER: c'est tout l'interet de la mesure.
     cold = json.loads(json.dumps(human_ok))
