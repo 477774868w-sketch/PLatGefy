@@ -61,7 +61,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import numpy as np
 
 
-STAKE_VERSION = "1.5.0"
+STAKE_VERSION = "1.6.0"
 CALIBRATION_SCHEMA = "titan-stake-calibration-1.4"
 PRICE_LOG_SCHEMA = "titan-stake-pricelog-1.4"
 DRIFT_SCHEMA = "titan-stake-drift-1.1"
@@ -76,6 +76,14 @@ ACCEPTED_COMMIT_SCHEMAS = {"titan-plat-commit-11.5", "titan-plat-commit-11.6"}
 # garanti et une fixture se mettrait a dependre du hasard du hachage.
 AUDIT_SCHEMA_CURRENT = "titan-plat-audit-11.6"
 EXPOSURE_SCHEMA = "titan-stake-exposure-1.4"
+CLV_SCHEMA = "titan-stake-clv-1.6"
+# Repetee dans chaque sortie CLV, parce qu'une mesure qui circule sans sa
+# clause de gouvernance finit toujours par etre lue comme une autorisation.
+CLV_GOVERNANCE = (
+    "la valeur de cloture est un INSTRUMENT DE MESURE et n'ouvre aucune porte: "
+    "elle n'entre ni dans le niveau d'echelle, ni dans le plafond de mise, ni "
+    "dans la calibration. Le palier 0 reste a 0 EUR quel que soit beta."
+)
 DRIFT_BUCKETS = [0.0, 5.0, 15.0, 30.0]
 
 # ECHELLE GRADUEE DE MISE.
@@ -1751,6 +1759,370 @@ def fit_drift_model(records: list[dict[str, Any]], min_observations: int = 200) 
 # 9. TEMPLATES
 # ---------------------------------------------------------------------------
 
+def centred_log_ratio(probabilities: np.ndarray) -> np.ndarray:
+    """Coordonnees CLR: log(p) recentre sur la course.
+
+    Les probabilites d'une course somment a 1: ce sont des COMPOSITIONS, pas des
+    grandeurs libres. Comparer deux compositions sans les recentrer melange le
+    signal cherche avec la simple difference de normalisation entre les deux
+    vecteurs. Le recentrage rend la mesure invariante a toute remise a l'echelle
+    de la course - y compris a un taux de retour different d'un operateur ou
+    d'un jour a l'autre.
+    """
+    logs = np.log(np.clip(probabilities, 1e-12, None))
+    return logs - logs.mean()
+
+
+def closing_line_value(
+    tickets: list[dict[str, Any]], price_log: list[dict[str, Any]],
+    *, draws: int = 2000, seed: int = 20260906, countable_only: bool = False,
+) -> dict[str, Any]:
+    """Le modele anticipe-t-il le mouvement du marche vers sa cloture ?
+
+    POURQUOI CETTE MESURE, ET POURQUOI ELLE N'EST PAS UN RENDEMENT.
+
+    En pari a cote fixe, battre la ligne de cloture EST l'avantage: on a pris
+    5,0 sur un cheval que le marche a ferme a 4,0, et l'on est paye 5,0. En
+    PARIMUTUEL - le cas francais - cela ne marche pas ainsi: on est paye le
+    rapport FINAL, quel que soit le moment de la mise. Le prix qu'on "prend"
+    n'existe pas.
+
+    La mesure garde pourtant tout son sens, mais elle change de nature. La
+    litterature etablit que la monnaie tardive est mieux informee que la
+    monnaie precoce (annexe ecosysteme §8: pres de la moitie des enjeux sont
+    engages dans les cinq dernieres minutes, et les parieurs informes retardent
+    deliberement leurs mises). Le rapport final est donc un ETALON PUBLIC plus
+    informe que le rapport observe au snapshot. Si nos desaccords avec le
+    marche du snapshot predisent le sens du mouvement ulterieur, alors le
+    modele contient une information que ce marche n'avait pas encore.
+
+    Ce que l'on mesure exactement:
+
+        d_i = clr(p_modele) - clr(p_marche)     desaccord du modele au snapshot
+        m_i = clr(p_cloture) - clr(p_marche)    mouvement propre du marche
+        beta = somme(d.m) / somme(d.d)          pente de m sur d
+
+    beta = 0 : nos desaccords sont du bruit vis-a-vis du mouvement ulterieur.
+    beta > 0 : le marche se deplace DANS notre sens; le modele savait quelque
+               chose que le prix du snapshot ignorait.
+    beta = 1 : le marche finit exactement sur notre opinion.
+
+    CE QUE beta > 0 NE PROUVE PAS. Il ne prouve aucun profit. En parimutuel on
+    encaisse la cloture: avoir raison AVANT elle ne paie rien en soi. Pour
+    gagner de l'argent il faudrait que l'information depasse le prelevement -
+    environ 15 % sur le simple - ce qui est une question distincte et bien plus
+    dure. beta est un instrument de MESURE, jamais une autorisation de miser,
+    et il n'entre dans aucune porte de l'echelle de mise.
+
+    Le test est volontairement CONSERVATEUR: le modele est scelle a as_of, vers
+    T-30, tandis que le marche de reference est celui du snapshot, souvent T-3.
+    On demande donc au modele de battre un marche qui a eu une demi-heure
+    d'information de plus que lui.
+    """
+    verify_ticket_journal(tickets)
+    verify_price_journal(price_log)
+    finals: dict[str, dict[str, float]] = {}
+    earliest: dict[str, dict[str, Any]] = {}
+    for record in price_log:
+        key = str(record["race_key"])
+        if record.get("kind") == "final":
+            if key in finals:
+                raise StakeError(f"Deux rapports finaux pour la meme course: {key}")
+            finals[key] = {str(k): float(v) for k, v in record["rapports"].items()}
+        elif record.get("kind") == "snapshot":
+            # Le snapshot le PLUS PRECOCE de la course; il sert de base
+            # independante a l'estimateur a bases separees, plus bas.
+            previous = earliest.get(key)
+            if previous is None or float(record["minutes_to_post"]) > float(
+                previous["minutes_to_post"]
+            ):
+                earliest[key] = record
+
+    rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, ticket in enumerate(tickets):
+        context = ticket.get("context") or {}
+        key = str(context.get("race_key", ticket.get("race_key", f"?{index}")))
+        final = finals.get(key)
+        if final is None:
+            skipped.append({"race_key": key, "reason": "aucun rapport final journalise"})
+            continue
+        model_raw = ticket.get("probabilities_model_raw") or {}
+        market_raw = ticket.get("probabilities_market_shin") or {}
+        if not model_raw or not market_raw:
+            skipped.append({"race_key": key, "reason": "ticket sans vecteur de probabilites"})
+            continue
+        published = bool(context.get("entry_sha256")) and any(
+            gate.get("gate") == "ENGAGEMENT_PUBLIE_AVANT_DEPART" and gate.get("passed")
+            for gate in ticket.get("gates", [])
+        )
+        if countable_only and not published:
+            skipped.append({"race_key": key, "reason": "engagement non publie avant le depart"})
+            continue
+        # NON-PARTANT TARDIF. Un cheval retire entre le snapshot et la cloture
+        # disparait des rapports finaux, et en parimutuel le retrait provoque un
+        # recalcul complet du pool. On restreint donc a l'INTERSECTION et l'on
+        # renormalise des deux cotes: comparer un vecteur a sept chevaux avec un
+        # vecteur a huit produirait un mouvement entierement fictif.
+        common = sorted(
+            set(model_raw) & set(market_raw) & set(final),
+            key=lambda item: int(item) if str(item).lstrip("-").isdigit() else 0,
+        )
+        if len(common) < 3:
+            skipped.append({"race_key": key, "reason": "moins de trois partants communs"})
+            continue
+        odds = {int(number): float(final[number]) for number in common}
+        if any(value <= 1.0 for value in odds.values()):
+            skipped.append({"race_key": key, "reason": "rapport final <= 1"})
+            continue
+        closing_map, shin_z = shin_probabilities(odds)
+        p_model = np.asarray([float(model_raw[n]) for n in common], dtype=float)
+        p_market = np.asarray([float(market_raw[n]) for n in common], dtype=float)
+        p_close = np.asarray([closing_map[int(n)] for n in common], dtype=float)
+        if p_model.sum() <= 0 or p_market.sum() <= 0:
+            skipped.append({"race_key": key, "reason": "vecteur de probabilites degenere"})
+            continue
+        p_model = p_model / p_model.sum()
+        p_market = p_market / p_market.sum()
+        disagreement = centred_log_ratio(p_model) - centred_log_ratio(p_market)
+        movement = centred_log_ratio(p_close) - centred_log_ratio(p_market)
+        # BASE PRECOCE INDEPENDANTE - correction d'un biais que l'estimateur
+        # simple porte structurellement. Voir la note sur beta_split plus bas:
+        # d et m partagent p_marche, donc TOUT bruit de pool dans ce vecteur
+        # entre avec le meme signe dans les deux et fabrique de la covariance
+        # meme quand le modele ne sait rien. Un snapshot anterieur - le releve
+        # T-10 que le protocole impose deja - fournit une base dont le bruit est
+        # independant de celui du snapshot principal.
+        early = earliest.get(key)
+        disagreement_early = None
+        if early is not None and float(early["minutes_to_post"]) > float(
+            context.get("minutes_to_post_at_snapshot") or 0.0
+        ):
+            early_rapports = {str(k): float(v) for k, v in early["rapports"].items()}
+            if set(common) <= set(early_rapports):
+                early_odds = {int(n): early_rapports[n] for n in common}
+                if all(value > 1.0 for value in early_odds.values()):
+                    early_map, _ = shin_probabilities(early_odds)
+                    p_early = np.asarray(
+                        [early_map[int(n)] for n in common], dtype=float
+                    )
+                    disagreement_early = (
+                        centred_log_ratio(p_model) - centred_log_ratio(p_early)
+                    )
+        observed_at = str(context.get("evaluated_at_utc") or "")
+        rows.append({
+            "race_key": key,
+            "day": observed_at[:10] or key[:10],
+            "n_runners": len(common),
+            "n_scratched_after_snapshot": len(set(market_raw) - set(final)),
+            "published_before_start": published,
+            "minutes_to_post": context.get("minutes_to_post_at_snapshot"),
+            "shin_z_closing": round(shin_z, 5),
+            "d": disagreement,
+            "m": movement,
+            "d_early": disagreement_early,
+        })
+
+    if not rows:
+        return {
+            "schema_version": CLV_SCHEMA,
+            "stake_version": STAKE_VERSION,
+            "n_races": 0,
+            "fitted": False,
+            "n_skipped": len(skipped),
+            "skipped": skipped[:20],
+            "reading": (
+                "aucune course exploitable: il faut, pour la MEME course, un ticket "
+                "journalise et un rapport final au journal de prix"
+            ),
+            "governance": CLV_GOVERNANCE,
+        }
+
+    all_d = np.concatenate([row["d"] for row in rows])
+    all_m = np.concatenate([row["m"] for row in rows])
+    denominator = float(all_d @ all_d)
+    if denominator <= 1e-12:
+        return {
+            "schema_version": CLV_SCHEMA,
+            "stake_version": STAKE_VERSION,
+            "n_races": len(rows),
+            "fitted": False,
+            "reason": "le modele n'a aucun desaccord avec le marche: beta indefini",
+            "governance": CLV_GOVERNANCE,
+        }
+    beta = float(all_d @ all_m) / denominator
+
+    # Bootstrap apparie par JOURNEE, comme partout ailleurs dans ce module: deux
+    # courses du meme jour partagent le terrain, la meteo et la population de
+    # parieurs, donc leurs residus ne sont pas independants.
+    clusters: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        clusters.setdefault(row["day"], []).append(index)
+    keys = sorted(clusters)
+    rng = np.random.default_rng(seed)
+    samples = np.empty(draws, dtype=float)
+    for draw in range(draws):
+        chosen = rng.choice(keys, size=len(keys), replace=True)
+        picked = [i for key in chosen for i in clusters[str(key)]]
+        d = np.concatenate([rows[i]["d"] for i in picked])
+        m = np.concatenate([rows[i]["m"] for i in picked])
+        bottom = float(d @ d)
+        samples[draw] = float(d @ m) / bottom if bottom > 1e-12 else 0.0
+    ci_low = float(np.quantile(samples, 0.025))
+    ci_high = float(np.quantile(samples, 0.975))
+    standard_error = float(samples.std(ddof=1))
+
+    # PROJECTION DE PUISSANCE. A effet constant, combien de courses encore avant
+    # que l'intervalle exclue zero ? C'est la seule facon de repondre a "ou en
+    # suis-je" autrement que par un compteur aveugle.
+    races_needed = None
+    if standard_error > 1e-12 and abs(beta) > 1e-12:
+        ratio = 1.96 * standard_error / abs(beta)
+        if ratio > 1.0:
+            races_needed = int(math.ceil(len(rows) * (ratio ** 2)))
+        else:
+            races_needed = len(rows)
+
+    # ESTIMATEUR A BASES SEPAREES - le garde-fou contre notre propre biais.
+    #
+    # beta simple partage p_marche entre d et m. Si le marche du snapshot porte
+    # du bruit de pool - et en parimutuel les pools precoces sont minces, donc
+    # il en porte - alors ce bruit entre dans d avec le signe moins et dans m
+    # avec le signe moins. Leur covariance est donc positive MEME SI le modele
+    # ne sait strictement rien: beta est biaise VERS LE HAUT sous l'hypothese
+    # nulle. Pour ce projet c'est le pire biais possible, celui qui annonce un
+    # avantage inexistant.
+    #
+    # Correction standard, sans aucun parametre a choisir: prendre pour d une
+    # base ANTERIEURE et independante - le releve T-10 que le protocole impose
+    # deja - et garder m sur la base du snapshot principal.
+    #
+    #     beta_split = somme(d_precoce . m) / somme(d_precoce . d)
+    #
+    # Les bruits des deux releves etant independants, les termes croises
+    # s'annulent en esperance et l'estimateur retrouve la meme grandeur que
+    # beta - la part du desaccord que le marche adopte - sans le biais.
+    split_rows = [row for row in rows if row["d_early"] is not None]
+    split: dict[str, Any] = {
+        "available": False,
+        "reason": (
+            "aucun snapshot de prix anterieur au snapshot d'evaluation. Relever "
+            "systematiquement T-10 PUIS T-3, comme le protocole l'impose deja: "
+            "sans base precoce independante, beta reste biaise vers le haut."
+        ),
+    }
+    if split_rows:
+        early_d = np.concatenate([row["d_early"] for row in split_rows])
+        late_d = np.concatenate([row["d"] for row in split_rows])
+        late_m = np.concatenate([row["m"] for row in split_rows])
+        bottom = float(early_d @ late_d)
+        if abs(bottom) > 1e-12:
+            beta_split = float(early_d @ late_m) / bottom
+            split_clusters: dict[str, list[int]] = {}
+            for index, row in enumerate(split_rows):
+                split_clusters.setdefault(row["day"], []).append(index)
+            split_keys = sorted(split_clusters)
+            rng_split = np.random.default_rng(seed + 1)
+            split_samples = np.empty(draws, dtype=float)
+            for draw in range(draws):
+                chosen = rng_split.choice(split_keys, size=len(split_keys), replace=True)
+                picked = [i for key in chosen for i in split_clusters[str(key)]]
+                e = np.concatenate([split_rows[i]["d_early"] for i in picked])
+                l = np.concatenate([split_rows[i]["d"] for i in picked])
+                mm = np.concatenate([split_rows[i]["m"] for i in picked])
+                den = float(e @ l)
+                split_samples[draw] = float(e @ mm) / den if abs(den) > 1e-12 else 0.0
+            split = {
+                "available": True,
+                "n_races": len(split_rows),
+                "beta_split_baseline": round(beta_split, 5),
+                "ci95_low": round(float(np.quantile(split_samples, 0.025)), 5),
+                "ci95_high": round(float(np.quantile(split_samples, 0.975)), 5),
+                "conclusive_at_95": bool(
+                    float(np.quantile(split_samples, 0.025)) > 0.0
+                    or float(np.quantile(split_samples, 0.975)) < 0.0
+                ),
+                "reading": (
+                    "estimateur non biaise par le bruit de pool du snapshot. C'est "
+                    "CELUI-CI qu'il faut croire quand les deux divergent: un "
+                    "beta simple nettement superieur au beta a bases separees "
+                    "signale que le premier lisait surtout du bruit de marche."
+                ),
+            }
+
+    # Lecture legible: parmi les chevaux que le modele aime le PLUS par rapport
+    # au marche, de combien le prix a-t-il bouge en leur faveur ?
+    order = np.argsort(all_d)
+    quintile = max(1, len(order) // 5)
+    liked = order[-quintile:]
+    disliked = order[:quintile]
+    conclusive = ci_low > 0.0 or ci_high < 0.0
+    return {
+        "schema_version": CLV_SCHEMA,
+        "stake_version": STAKE_VERSION,
+        "n_races": len(rows),
+        "n_published_races": sum(1 for row in rows if row["published_before_start"]),
+        "n_day_clusters": len(keys),
+        "n_observations": int(all_d.size),
+        "n_races_with_late_scratch": sum(
+            1 for row in rows if row["n_scratched_after_snapshot"] > 0
+        ),
+        "n_skipped": len(skipped),
+        "skipped": skipped[:20],
+        "countable_only": bool(countable_only),
+        "fitted": True,
+        "beta_market_follows_model": round(beta, 5),
+        "ci95_low": round(ci_low, 5),
+        "ci95_high": round(ci_high, 5),
+        "standard_error": round(standard_error, 5),
+        "bootstrap_unit": "journee_de_course",
+        "bootstrap_draws": draws,
+        "conclusive_at_95": bool(conclusive),
+        "verdict": (
+            "LE_MODELE_ANTICIPE_LE_MARCHE" if ci_low > 0.0 else
+            "LE_MARCHE_CONTREDIT_LE_MODELE" if ci_high < 0.0 else
+            "INDECIS"
+        ),
+        "races_needed_for_verdict_at_current_effect": races_needed,
+        "split_baseline_estimator": split,
+        "mean_move_on_most_liked": round(float(all_m[liked].mean()), 5),
+        "mean_move_on_least_liked": round(float(all_m[disliked].mean()), 5),
+        "legible_reading": (
+            f"sur le cinquieme des partants que le modele prefere le plus au marche, "
+            f"le prix a bouge de {all_m[liked].mean():+.3f} en log-probabilite d'ici "
+            f"la cloture; sur le cinquieme qu'il rejette le plus, "
+            f"{all_m[disliked].mean():+.3f}. Un ecart positif entre les deux signifie "
+            f"que la monnaie tardive est allee dans notre sens."
+        ),
+        "reading": (
+            "beta est la part de notre desaccord avec le marche du snapshot que le "
+            "marche finit par ADOPTER avant la cloture. Positif et significatif: le "
+            "modele contient une information que ce marche n'avait pas encore."
+        ),
+        "parimutuel_warning": (
+            "EN PARIMUTUEL, UN BETA POSITIF N'EST PAS UN PROFIT. On est paye le "
+            "rapport FINAL quel que soit le moment de la mise: avoir raison avant la "
+            "cloture ne rapporte rien en soi. Pour gagner, l'information doit en plus "
+            "depasser le prelevement (environ 15 % sur le simple, 36 % sur le trio). "
+            "beta mesure si le modele SAIT quelque chose, pas s'il RAPPORTE."
+        ),
+        "confounders": [
+            "bruit de pool partage: d et m sont tous deux mesures depuis le marche du "
+            "snapshot, donc le bruit de ce marche gonfle beta meme sous l'hypothese "
+            "nulle. C'est le biais le plus dangereux ici - il annonce un avantage "
+            "inexistant. Lire beta a bases separees, qui en est immunise.",
+            "diffusion lente d'une information publique: si le modele et la monnaie "
+            "tardive reagissent au meme fait que le marche du snapshot n'avait pas "
+            "encore integre, beta est positif sans aucune analyse superieure",
+            "selection des courses: celles que l'operateur choisit d'analyser ne sont "
+            "pas un echantillon aleatoire du programme",
+            "un beta positif obtenu sur des courses EXPLORATOIRES n'est pas opposable: "
+            "seule la sous-population publiee avant le depart l'est",
+        ],
+        "governance": CLV_GOVERNANCE,
+    }
+
+
 def market_template() -> dict[str, Any]:
     return {
         "schema_version": MARKET_SCHEMA,
@@ -1950,7 +2322,8 @@ def _synthetic_audits_with_drift(
 
 
 def staking_progress(
-    tickets: list[dict[str, Any]], calibration: dict[str, Any] | None
+    tickets: list[dict[str, Any]], calibration: dict[str, Any] | None,
+    price_log: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Ou en est le systeme sur l'echelle, et ce qui debloque le palier suivant.
 
@@ -1991,9 +2364,31 @@ def staking_progress(
             max(0, nxt["min_races"] - races_calibrated) if nxt else 0
         ),
         "edge_estimate": (calibration or {}).get("bootstrap"),
+        # VALEUR DE CLOTURE (v1.6). Affichee ICI, sur le compteur que
+        # l'operateur regarde deja, parce qu'elle repond des la premiere dizaine
+        # de courses a la question a laquelle le compteur de calibration ne
+        # repondra pas avant deux cents: le modele sait-il quelque chose ?
+        # Elle n'ouvre aucune porte - voir CLV_GOVERNANCE.
+        "closing_line_value": (
+            closing_line_value(tickets, price_log) if price_log else {
+                "fitted": False,
+                "reading": (
+                    "aucun journal de prix fourni: passer --prices PRICES.jsonl. "
+                    "C'est la mesure la moins chere et la plus rapide du projet, et "
+                    "elle ne demande qu'un rapport final journalise par course."
+                ),
+            }
+        ),
         "reading": (
             "chaque course auditee et engagee avant le depart fait avancer le compteur; "
             "une course analysee mais non journalisee ne compte pas"
+        ),
+        "measurement_vs_permission": (
+            "deux compteurs distincts et volontairement decouples: la CALIBRATION "
+            "autorise (elle ouvre les paliers de mise, et exige 200 courses); la "
+            "VALEUR DE CLOTURE mesure (elle tranche des la premiere dizaine, et "
+            "n'autorise rien). Les confondre serait ouvrir une porte avec un "
+            "instrument."
         ),
     }
 
@@ -2327,6 +2722,203 @@ def self_test() -> None:
     assert progress["current_level"] == 0 and progress["races_to_next_level"] == 50
     checks["progress_reports_next_unlock"] = True
 
+    # --- v1.6 VALEUR DE CLOTURE -----------------------------------------------
+    # On fabrique un couple (journal de tickets, journal de prix) ou le marche
+    # final se deplace VERS l'opinion du modele, puis un ou le desaccord est du
+    # pur bruit. L'instrument doit trancher dans le premier cas et rester
+    # indecis dans le second.
+    def clv_fixture(
+        n_races: int, follow: float, *, field: int = 8, scratch_on: set[int] | None = None,
+        noise: float = 0.06, seed: int = 4242, pool_noise: float = 0.0,
+        with_early_snapshot: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        generator = np.random.default_rng(seed)
+        tickets_out: list[dict[str, Any]] = []
+        prices_out: list[dict[str, Any]] = []
+        previous_ticket: str | None = None
+        previous_price: str | None = None
+        scratch_on = scratch_on or set()
+        for race in range(n_races):
+            numbers = list(range(1, field + 1))
+            base = generator.normal(0.0, 0.7, field)
+            truth = np.exp(base) / np.exp(base).sum()
+            # Le marche OBSERVE porte du bruit de pool autour du consensus vrai.
+            # A pool_noise = 0 on retrouve le cas simple: marche == verite.
+            late_log = np.log(truth) + generator.normal(0.0, pool_noise, field)
+            market = np.exp(late_log) / np.exp(late_log).sum()
+            early_log = np.log(truth) + generator.normal(0.0, pool_noise, field)
+            early = np.exp(early_log) / np.exp(early_log).sum()
+            # Desaccord du modele, centre pour ne pas biaiser la composition.
+            # Il porte sur la VERITE, pas sur le marche observe.
+            disagreement = generator.normal(0.0, 0.45, field)
+            disagreement -= disagreement.mean()
+            model_log = np.log(truth) + disagreement
+            model = np.exp(model_log) / np.exp(model_log).sum()
+            # Le marche final adopte une fraction `follow` du desaccord.
+            close_log = np.log(truth) + follow * disagreement + generator.normal(
+                0.0, noise, field
+            )
+            close = np.exp(close_log) / np.exp(close_log).sum()
+            keep = [i for i in range(field) if not (race in scratch_on and i == field - 1)]
+            # Les rapports finaux portent la marge de l'operateur (TRJ ~ 85 %).
+            rapports = {
+                str(numbers[i]): float(0.85 / max(close[i], 1e-6)) for i in keep
+            }
+            # Trois courses par journee, horodatage STRICTEMENT croissant: les
+            # deux journaux sont chaines et refusent tout desordre chronologique.
+            day = f"2026-09-{(race // 3) + 1:02d}"
+            stamp = f"{day}T12:{(race % 3) * 10:02d}:00+00:00"
+            ticket = {
+                "schema_version": TICKET_SCHEMA,
+                "stake_version": STAKE_VERSION,
+                "prev_ticket_sha256": previous_ticket,
+                "decision": "PAPIER",
+                "context": {
+                    "race_key": f"CLV-{race}",
+                    "evaluated_at_utc": stamp,
+                    "entry_sha256": "e" * 64,
+                    "minutes_to_post_at_snapshot": 3.0,
+                },
+                "gates": [{"gate": "ENGAGEMENT_PUBLIE_AVANT_DEPART", "passed": True,
+                           "detail": "synthetique", "kind": "GRADUANTE"}],
+                "bets": [],
+                "total_stake_pct_bankroll": 0.0,
+                "probabilities_model_raw": {
+                    str(numbers[i]): round(float(model[i]), 6) for i in range(field)
+                },
+                "probabilities_market_shin": {
+                    str(numbers[i]): round(float(market[i]), 6) for i in range(field)
+                },
+            }
+            ticket["ticket_sha256"] = sha256_obj(ticket)
+            tickets_out.append(ticket)
+            previous_ticket = ticket["ticket_sha256"]
+            if with_early_snapshot:
+                early_rapports = {
+                    str(numbers[i]): float(0.85 / max(early[i], 1e-6)) for i in keep
+                }
+                snap = price_record(
+                    f"CLV-{race}", stamp, 10.0, early_rapports, "snapshot",
+                    previous_price,
+                )
+                prices_out.append(snap)
+                previous_price = snap["record_sha256"]
+            record = price_record(
+                f"CLV-{race}", stamp, 0.0, rapports, "final", previous_price
+            )
+            prices_out.append(record)
+            previous_price = record["record_sha256"]
+        return tickets_out, prices_out
+
+    followed_tickets, followed_prices = clv_fixture(60, follow=0.55)
+    followed = closing_line_value(followed_tickets, followed_prices, draws=400)
+    assert followed["fitted"] is True
+    assert followed["n_races"] == 60
+    # Le marche adopte 55 % du desaccord: beta doit s'en approcher.
+    assert 0.35 < followed["beta_market_follows_model"] < 0.75, followed
+    assert followed["ci95_low"] > 0.0
+    assert followed["verdict"] == "LE_MODELE_ANTICIPE_LE_MARCHE"
+    assert followed["conclusive_at_95"] is True
+    # Lecture legible: les chevaux preferes doivent raccourcir plus que les autres.
+    assert followed["mean_move_on_most_liked"] > followed["mean_move_on_least_liked"]
+    checks["clv_detects_anticipated_move"] = True
+
+    # Desaccord pur bruit: l'instrument doit rester INDECIS, sans quoi il
+    # trouverait un avantage a tout le monde.
+    noise_tickets, noise_prices = clv_fixture(60, follow=0.0, seed=99)
+    noisy = closing_line_value(noise_tickets, noise_prices, draws=400)
+    assert noisy["ci95_low"] <= 0.0 <= noisy["ci95_high"], noisy
+    assert noisy["verdict"] == "INDECIS"
+    assert noisy["conclusive_at_95"] is False
+    # La projection de puissance doit demander PLUS de courses qu'on n'en a.
+    assert (noisy["races_needed_for_verdict_at_current_effect"] is None
+            or noisy["races_needed_for_verdict_at_current_effect"] > noisy["n_races"])
+    checks["clv_indecisive_on_pure_noise"] = True
+
+    # INTERACTION: non-partant entre le snapshot et la cloture. Le cheval retire
+    # disparait des rapports finaux et le pool est recalcule. Comparer un
+    # vecteur a huit chevaux avec un vecteur a sept fabriquerait un mouvement
+    # entierement fictif; on doit restreindre a l'intersection et renormaliser.
+    scratched_tickets, scratched_prices = clv_fixture(
+        60, follow=0.55, scratch_on=set(range(0, 60, 2))
+    )
+    scratched = closing_line_value(scratched_tickets, scratched_prices, draws=400)
+    assert scratched["n_races"] == 60
+    assert scratched["n_races_with_late_scratch"] == 30
+    # Le beta doit rester du meme ordre: un retrait ne cree pas de signal.
+    assert 0.30 < scratched["beta_market_follows_model"] < 0.80, scratched
+    assert abs(scratched["beta_market_follows_model"]
+               - followed["beta_market_follows_model"]) < 0.25
+    checks["clv_survives_late_scratch"] = True
+
+    # LA RESERVE. La valeur de cloture est un instrument de MESURE: elle ne doit
+    # ouvrir aucune porte. Un beta ecrasant laisse le palier 0 a zero euro.
+    before = staking_progress(followed_tickets, None)
+    after = staking_progress(followed_tickets, None, followed_prices)
+    assert after["closing_line_value"]["ci95_low"] > 0.0
+    for field_name in ("current_level", "current_mode", "max_stake_pct_per_bet",
+                       "positive_edge_established", "races_to_next_level"):
+        assert before[field_name] == after[field_name], field_name
+    assert after["current_level"] == 0
+    assert after["max_stake_pct_per_bet"] == 0.0
+    checks["clv_never_opens_a_gate"] = True
+
+    # Journaux exiges intacts: une ligne de prix modifiee doit faire echouer la
+    # mesure, pas produire un beta silencieusement faux.
+    tampered = json.loads(json.dumps(followed_prices))
+    tampered[10]["rapports"] = {k: v * 2.0 for k, v in tampered[10]["rapports"].items()}
+    try:
+        closing_line_value(followed_tickets, tampered, draws=50)
+    except StakeError:
+        pass
+    else:
+        raise AssertionError("Un journal de prix altere aurait du faire echouer la CLV")
+    # Une course sans rapport final est ECARTEE et comptee, jamais devinee.
+    partial = closing_line_value(followed_tickets, followed_prices[:40], draws=100)
+    assert partial["n_races"] == 40 and partial["n_skipped"] == 20
+    # Aucun couple exploitable: sortie honnete, pas un beta invente.
+    empty = closing_line_value(followed_tickets, [], draws=50)
+    assert empty["fitted"] is False and empty["n_races"] == 0
+    checks["clv_requires_intact_journals"] = True
+
+    # LE BIAIS QUE L'INSTRUMENT SIMPLE PORTE, ET SA CORRECTION.
+    #
+    # d et m sont tous deux mesures depuis le marche du snapshot. Tout bruit de
+    # pool dans ce vecteur entre donc avec le meme signe dans les deux et
+    # fabrique de la covariance MEME QUAND LE MODELE NE SAIT RIEN. Ici le modele
+    # ne sait strictement rien - follow = 0 - et le marche observe porte du
+    # bruit: beta simple doit se declarer positif, ce qui serait un faux
+    # avantage, et l'estimateur a bases separees doit le refuser.
+    biased_tickets, biased_prices = clv_fixture(
+        90, follow=0.0, pool_noise=0.30, with_early_snapshot=True, seed=515,
+    )
+    biased = closing_line_value(biased_tickets, biased_prices, draws=400)
+    assert biased["fitted"] is True
+    # Le biais est REEL et se voit: l'estimateur naif annonce un avantage.
+    assert biased["beta_market_follows_model"] > 0.10, biased["beta_market_follows_model"]
+    assert biased["ci95_low"] > 0.0, "le biais de base partagee devrait etre visible"
+    # L'estimateur a bases separees doit ramener beta vers zero.
+    corrected = biased["split_baseline_estimator"]
+    assert corrected["available"] is True
+    assert corrected["n_races"] == 90
+    assert abs(corrected["beta_split_baseline"]) < abs(
+        biased["beta_market_follows_model"]
+    ), corrected
+    assert corrected["ci95_low"] <= 0.0 <= corrected["ci95_high"], corrected
+    assert corrected["conclusive_at_95"] is False
+    # Et sur un VRAI signal, l'estimateur corrige doit continuer a conclure.
+    real_tickets, real_prices = clv_fixture(
+        90, follow=0.55, pool_noise=0.30, with_early_snapshot=True, seed=707,
+    )
+    real = closing_line_value(real_tickets, real_prices, draws=400)
+    real_split = real["split_baseline_estimator"]
+    assert real_split["available"] is True
+    assert real_split["ci95_low"] > 0.0, real_split
+    # Sans snapshot precoce, l'estimateur corrige n'est pas disponible et le dit
+    # au lieu de laisser croire que beta simple suffit.
+    assert followed["split_baseline_estimator"]["available"] is False
+    checks["clv_split_baseline_removes_shared_noise_bias"] = True
+
     print(json.dumps(
         {
             "status": "PASS",
@@ -2387,6 +2979,13 @@ def main(argv: list[str] | None = None) -> int:
     progress.add_argument("tickets", nargs="*")
     progress.add_argument("--ticket-journal", default=None)
     progress.add_argument("--calibration", default=None)
+    progress.add_argument("--prices", default=None)
+    clv = sub.add_parser("clv")
+    clv.add_argument("--ticket-journal", required=True)
+    clv.add_argument("--prices", required=True)
+    clv.add_argument("--countable-only", action="store_true")
+    clv.add_argument("--draws", type=int, default=2000)
+    clv.add_argument("-o", "--output", default=None)
     args = parser.parse_args(argv)
 
     def load(path: str) -> Any:
@@ -2471,7 +3070,17 @@ def main(argv: list[str] | None = None) -> int:
             value = staking_progress(
                 progress_tickets,
                 load(args.calibration) if args.calibration else None,
+                read_jsonl(args.prices) if args.prices else None,
             )
+            print(json.dumps(value, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "clv":
+            value = closing_line_value(
+                read_jsonl(args.ticket_journal), read_jsonl(args.prices),
+                draws=args.draws, countable_only=args.countable_only,
+            )
+            if args.output:
+                write_json(args.output, value)
             print(json.dumps(value, ensure_ascii=False, indent=2))
             return 0
         if args.command == "explain-gate":
